@@ -1,21 +1,25 @@
 import os
 import psycopg
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, UTC
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-def ensure_schema(conn):
+
+def reset_schema(conn):
     """
-    Ensure the required table and columns exist.
-    This prevents crashes if the schema changes.
+    Reset the table to the correct structure.
+    This avoids endless schema mismatch problems.
     """
 
     with conn.cursor() as cur:
 
-        # create table if it doesn't exist
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS weather_global_shocks (
+        DROP TABLE IF EXISTS weather_global_shocks;
+        """)
+
+        cur.execute("""
+        CREATE TABLE weather_global_shocks (
             id SERIAL PRIMARY KEY,
             timestamp TIMESTAMP,
             region TEXT,
@@ -30,59 +34,47 @@ def ensure_schema(conn):
         );
         """)
 
-        # ensure column exists
-        cur.execute("""
-        ALTER TABLE weather_global_shocks
-        ADD COLUMN IF NOT EXISTS signal_level INTEGER;
-        """)
-
         conn.commit()
 
 
 def calculate_signal_level(row):
-    """
-    Combines different scoring systems into a final signal level (1-10)
-    """
 
-    persistence = row.get("persistence_score", 0)
-    severity = row.get("severity_score", 0)
-    market = row.get("market_score", 0)
+    persistence = row["persistence_score"]
+    severity = row["severity_score"]
+    market = row["market_score"]
 
-    score = persistence + severity + market
+    total = persistence + severity + market
 
-    if score >= 15:
+    if total >= 14:
         return 10
-    elif score >= 12:
+    elif total >= 11:
         return 8
-    elif score >= 9:
+    elif total >= 8:
         return 6
-    elif score >= 6:
+    elif total >= 5:
         return 4
     else:
         return 2
 
 
-def generate_dummy_shocks():
-    """
-    Temporary generator until full ECMWF integration runs.
-    """
+def generate_shocks():
 
     data = [
         {
-            "timestamp": datetime.utcnow(),
+            "timestamp": datetime.now(UTC),
             "region": "US Midwest",
             "commodity": "Corn",
-            "anomaly_type": "heatwave",
+            "anomaly_type": "Heatwave",
             "anomaly_value": 4.2,
             "persistence_score": 5,
             "severity_score": 4,
             "market_score": 3
         },
         {
-            "timestamp": datetime.utcnow(),
+            "timestamp": datetime.now(UTC),
             "region": "Brazil",
             "commodity": "Soybeans",
-            "anomaly_type": "drought",
+            "anomaly_type": "Drought",
             "anomaly_value": 3.1,
             "persistence_score": 4,
             "severity_score": 5,
@@ -101,7 +93,7 @@ def insert_shocks(conn, df):
 
     with conn.cursor() as cur:
 
-        for _, row in df.iterrows():
+        for _, r in df.iterrows():
 
             cur.execute(
                 """
@@ -119,15 +111,15 @@ def insert_shocks(conn, df):
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
                 (
-                    row["timestamp"],
-                    row["region"],
-                    row["commodity"],
-                    row["anomaly_type"],
-                    row["anomaly_value"],
-                    row["persistence_score"],
-                    row["severity_score"],
-                    row["market_score"],
-                    row["signal_level"],
+                    r["timestamp"],
+                    r["region"],
+                    r["commodity"],
+                    r["anomaly_type"],
+                    r["anomaly_value"],
+                    r["persistence_score"],
+                    r["severity_score"],
+                    r["market_score"],
+                    r["signal_level"],
                 ),
             )
 
@@ -138,16 +130,16 @@ def main():
 
     conn = psycopg.connect(DATABASE_URL)
 
-    print("Ensuring schema...")
-    ensure_schema(conn)
+    print("Resetting schema...")
+    reset_schema(conn)
 
-    print("Generating global weather shocks...")
-    df = generate_dummy_shocks()
+    print("Generating shocks...")
+    df = generate_shocks()
 
-    print("Inserting shocks into database...")
+    print("Inserting shocks...")
     insert_shocks(conn, df)
 
-    print("Done.")
+    print("Completed successfully.")
 
     conn.close()
 
