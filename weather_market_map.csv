@@ -1,0 +1,15 @@
+﻿Region,WeatherEvent,BestVehicle,PrimaryExpressions,SecondaryEquityProxies
+Northwest Europe,Cold deepening,Commodity / Futures,"Natural gas futures, Power stress, Utility exposure","LNG, SHEL, BP"
+Canadian Prairies,Crop stress rising,Commodity / Futures,"Wheat futures, Canola futures, Fertilizer sector","NTR, MOS, CF, ADM, BG"
+Brazil Coffee Belt,Rainfall falling,Commodity / Futures,"Coffee futures, JO ETF",SBUX
+West Africa Cocoa Belt,Rainfall falling,Commodity / Futures,Cocoa futures,"HSY, MDLZ, GIS"
+Argentina Pampas,Soy crop stress rising,Commodity / Futures,"Soy futures, Fertilizer sector","BG, ADM, MOS, NTR, CF"
+Mato Grosso,Soy / corn stress rising,Commodity / Futures,"Soy futures, Corn futures","BG, ADM, MOS, NTR, CF"
+Gulf of Mexico,Storm intensifying,Equity Proxy,"WTI crude exposure, Offshore oil disruption","SLB, HAL, XOM, CVX, LNG, FLNG"
+US East Coast,Storm intensifying,Equity Proxy,"Utility disruption, Insurance risk","DUK, SO, TRV, ALL, HIG, UAL, JBLU, RCL, CCL"
+North Sea,Storm intensifying,Energy / Shipping,"North Sea energy disruption, Offshore energy risk","SHEL, BP, LNG"
+East China,Storm intensifying,Shipping / Logistics,"Shipping disruption, Port/logistics disruption","STNG, TK, FLNG, TRV, ALL, HIG"
+Texas,Heat building,Utility / Power,"Texas power demand, Utility load growth","VST, NRG, SO, DUK"
+Panama Canal,Rainfall falling,Shipping / Logistics,"Shipping flow disruption, Tanker routing stress","STNG, TK, FLNG"
+Rhine Corridor,Logistics disruption risk,Industrial / Logistics,"River logistics disruption, Chemical flow risk","SHEL, BP"
+SE Asia Palm Oil Belt,Rainfall falling,Commodity / Futures,"Palm oil futures, Food input pressure","ADM, MDLZ, GIS"

@@ -1,0 +1,26 @@
+type,lat,lon_normal,value,macro_region,Market,AffectedIndustries,BestVehicle,TradePriority
+dry,-24.0,173.25,-466.21,SE Asia / Australia,Agriculture / Food Inputs,"Palm oil, grains, food inputs",Commodity / Futures,4
+wet,-28.0,61.5,426.21,Other,Flood / Logistics / Crop Disruption,"Logistics, ports, crops, insurers",Logistics / Proxy,4
+dry,20.75,-156.5,-307.12,North America,Agriculture / Fertilizer,"Grains, oilseeds, fertilizers, agribusiness",Commodity / Futures,4
+dry,-31.0,-38.25,-301.25,South America,Agriculture / Fertilizer,"Grains, oilseeds, fertilizers, agribusiness",Commodity / Futures,4
+wet,-20.75,170.0,298.19,SE Asia / Australia,Flood / Logistics / Crop Disruption,"Logistics, ports, crops, insurers",Logistics / Proxy,4
+dry,-28.0,-166.25,-278.98,Other,Agriculture,"Crop stress, fertilizers, agribusiness",Commodity / Futures,4
+dry,25.0,91.75,-245.86,Asia,Agriculture / Food Inputs,"Palm oil, grains, food inputs",Commodity / Futures,4
+wet,-17.5,-64.75,226.23,South America,Flood / Logistics / Crop Disruption,"Logistics, ports, crops, insurers",Logistics / Proxy,4
+dry,-30.5,-19.75,-222.12,Africa / Middle East,Agriculture,"Crop stress, fertilizers, agribusiness",Commodity / Futures,4
+wet,24.5,-148.25,198.83,North America,Flood / Logistics / Crop Disruption,"Logistics, ports, crops, insurers",Logistics / Proxy,4
+wet,-15.0,34.5,135.95,Africa / Middle East,Flood / Logistics / Crop Disruption,"Logistics, ports, crops, insurers",Logistics / Proxy,4
+dry,24.25,159.75,-132.06,NW Pacific,Agriculture,"Crop stress, fertilizers, agribusiness",Commodity / Futures,4
+wet,24.25,90.5,131.73,Asia,Flood / Logistics / Crop Disruption,"Logistics, ports, crops, insurers",Logistics / Proxy,4
+wet,37.75,15.25,126.95,Europe,Flood / Logistics / Crop Disruption,"Logistics, ports, crops, insurers",Logistics / Proxy,4
+storm,80.25,-68.0,121.26,Other,Storm / Logistics,"Shipping, insurers, logistics",Equity / Proxy,4
+dry,46.0,8.25,-112.52,Europe,Agriculture,"Crop stress, fertilizers, agribusiness",Commodity / Futures,4
+storm,73.5,-52.25,110.08,North America,Utilities / Insurance / Logistics,"Utilities, insurers, logistics, ports",Equity / Utility,4
+storm,-58.5,-38.0,101.34,South America,Storm / Logistics,"Shipping, insurers, logistics",Equity / Proxy,4
+storm,37.75,-22.0,80.13,North Atlantic,Storm / Shipping / Insurance,"Offshore energy, shipping, insurance, airlines, cruises",Equity / Shipping,4
+wet,38.5,-18.75,64.16,North Atlantic,Flood / Logistics / Crop Disruption,"Logistics, ports, crops, insurers",Logistics / Proxy,4
+storm,-50.0,117.25,62.39,SE Asia / Australia,Storm / Logistics,"Shipping, insurers, logistics",Equity / Proxy,4
+storm,33.75,137.5,61.46,Asia,Storm / Logistics,"Shipping, insurers, logistics",Equity / Proxy,4
+wet,41.75,157.0,61.4,NW Pacific,Flood / Logistics / Crop Disruption,"Logistics, ports, crops, insurers",Logistics / Proxy,4
+storm,36.75,-20.0,58.97,Africa / Middle East,Storm / Logistics,"Shipping, insurers, logistics",Equity / Proxy,4
+storm,68.75,38.0,52.96,Europe,Utilities / Insurance / Logistics,"Utilities, insurers, logistics, ports",Equity / Utility,4

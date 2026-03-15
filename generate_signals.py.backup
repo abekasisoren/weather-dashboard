@@ -1,0 +1,161 @@
+import pandas as pd
+from pathlib import Path
+
+weather_df = pd.read_csv("weather_values.csv")
+weather = dict(zip(weather_df["metric"], weather_df["value"]))
+
+prev_file = Path("weather_values_prev.csv")
+if prev_file.exists():
+    prev_df = pd.read_csv(prev_file)
+    prev_weather = dict(zip(prev_df["metric"], prev_df["value"]))
+else:
+    prev_weather = {}
+
+signals = []
+
+def get_delta(metric):
+    current = float(weather.get(metric, 0))
+    previous = float(prev_weather.get(metric, 0))
+    return current, previous, current - previous
+
+def add_signal(region, signal, market, raw_strength,
+               weather_reason, market_reason,
+               recommendation, stock, etf, futures,
+               confidence, risk,
+               commodity_weight, equity_weight):
+
+    weather_score = round(abs(raw_strength), 2)
+    commodity_score = round(abs(raw_strength) * commodity_weight, 2)
+    equity_etf_score = round(abs(raw_strength) * equity_weight, 2)
+
+    trade_raw = (
+        weather_score * 0.25 +
+        commodity_score * 0.45 +
+        equity_etf_score * 0.30
+    )
+    trade_score = min(10, round(trade_raw / 5, 1))
+
+    signals.append({
+        "Region": region,
+        "WeatherSignal": signal,
+        "Market": market,
+        "WeatherScore": weather_score,
+        "CommodityScore": commodity_score,
+        "EquityETFScore": equity_etf_score,
+        "TradeScore": trade_score,
+        "WeatherReasoning": weather_reason,
+        "MarketReasoning": market_reason,
+        "Recommendation": recommendation,
+        "StockIdea": stock,
+        "ETFIdea": etf,
+        "FuturesIdea": futures,
+        "Confidence": confidence,
+        "ModelSource": "forecast_delta_model",
+        "RiskNote": risk
+    })
+
+# Gulf storm delta trigger
+gulf_now, gulf_prev, gulf_delta = get_delta("gulf_storm_index")
+if gulf_delta >= 10:
+    add_signal(
+        region="Gulf of Mexico",
+        signal="Storm forecast worsening",
+        market="Oil / Offshore / Insurance",
+        raw_strength=gulf_delta,
+        weather_reason=f"Gulf storm index jumped from {gulf_prev:.1f} to {gulf_now:.1f} (change: +{gulf_delta:.1f}).",
+        market_reason="A sharp worsening in the Gulf storm forecast can reprice offshore oil, energy logistics, and insurance risk.",
+        recommendation="WATCH / BUY",
+        stock="SLB",
+        etf="XLE",
+        futures="WTI crude",
+        confidence="Medium",
+        risk="Storm path uncertainty remains high.",
+        commodity_weight=1.5,
+        equity_weight=1.1
+    )
+
+# North Atlantic storm delta trigger
+na_now, na_prev, na_delta = get_delta("north_atlantic_storm_index")
+if na_delta >= 10:
+    add_signal(
+        region="North Atlantic",
+        signal="Storm forecast worsening",
+        market="Shipping / LNG / Insurance",
+        raw_strength=na_delta,
+        weather_reason=f"North Atlantic storm index jumped from {na_prev:.1f} to {na_now:.1f} (change: +{na_delta:.1f}).",
+        market_reason="A sharp worsening in North Atlantic storm forecasts can disrupt shipping routes and pressure insurance sentiment.",
+        recommendation="WATCH / BUY",
+        stock="FLNG",
+        etf="KIE",
+        futures="Freight / LNG routes",
+        confidence="Medium",
+        risk="Listed equity impacts are indirect.",
+        commodity_weight=1.4,
+        equity_weight=1.2
+    )
+
+# Texas heat delta trigger
+tx_now, tx_prev, tx_delta = get_delta("texas_temp_revision")
+if tx_delta >= 2:
+    add_signal(
+        region="Texas",
+        signal="Heat forecast worsening",
+        market="Power Demand",
+        raw_strength=tx_delta,
+        weather_reason=f"Texas temperature revision moved from {tx_prev:.1f} to {tx_now:.1f} (change: +{tx_delta:.1f}°C).",
+        market_reason="A meaningful upward shift in the Texas heat forecast can increase cooling demand and grid stress.",
+        recommendation="WATCH / BUY",
+        stock="VST",
+        etf="XLU",
+        futures="ERCOT power proxy",
+        confidence="Medium",
+        risk="Public market exposure is indirect.",
+        commodity_weight=2.0,
+        equity_weight=2.2
+    )
+
+# NW Europe colder delta trigger
+eu_now, eu_prev, eu_delta = get_delta("nw_europe_temp_revision")
+if eu_delta <= -2:
+    add_signal(
+        region="NW Europe",
+        signal="Cooling forecast worsening",
+        market="Gas / Power",
+        raw_strength=eu_delta,
+        weather_reason=f"NW Europe temperature revision moved from {eu_prev:.1f} to {eu_now:.1f} (change: {eu_delta:.1f}°C).",
+        market_reason="A sudden colder revision can increase heating demand and support gas/power sensitive assets.",
+        recommendation="BUY / WATCH",
+        stock="LNG",
+        etf="UNG",
+        futures="Natural Gas Futures",
+        confidence="Medium",
+        risk="US gas proxies are imperfect for Europe.",
+        commodity_weight=3.5,
+        equity_weight=1.8
+    )
+
+if not signals:
+    signals.append({
+        "Region": "None",
+        "WeatherSignal": "No strong forecast change",
+        "Market": "None",
+        "WeatherScore": 0,
+        "CommodityScore": 0,
+        "EquityETFScore": 0,
+        "TradeScore": 0,
+        "WeatherReasoning": "No weather variable changed enough versus the previous forecast run.",
+        "MarketReasoning": "No fresh market-moving forecast delta detected.",
+        "Recommendation": "NO ACTION",
+        "StockIdea": "None",
+        "ETFIdea": "None",
+        "FuturesIdea": "None",
+        "Confidence": "Low",
+        "ModelSource": "forecast_delta_model",
+        "RiskNote": "Wait for the next forecast update."
+    })
+
+df = pd.DataFrame(signals)
+df.to_csv("signals.csv", index=False)
+
+print("signals.csv generated with forecast delta model")
+print(df)

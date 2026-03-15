@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+streamlit run weather_signal_dashboard_app.py --server.port $PORT --server.address 0.0.0.0

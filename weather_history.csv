@@ -1,0 +1,6 @@
+run_date,run_time,gulf_storm_index,us_east_coast_storm_index,north_sea_storm_index,china_east_storm_index,texas_mean_temp_c,california_mean_temp_c,nw_europe_mean_temp_c,cornbelt_hotdry_score,us_wheat_hotdry_score,argentina_soy_hotdry_score,black_sea_hotdry_score,brazil_coffee_precip_mm,west_africa_cocoa_precip_mm,india_monsoon_precip_mm,canadian_prairies_hotdry_score,mato_grosso_hotdry_score,rhine_corridor_precip_mm,rhine_corridor_storm_index,panama_canal_precip_mm,sea_palm_oil_precip_mm,sea_palm_oil_hotdry_score
+20260309,0,0.0,4.44,76.14,0.0,19.39,18.92,5.68,3.41,11.7,19.65,3.36,44.2,7.72,0.96,-6.08,14.71,10.09,0.75,5.28,20.13,18.06
+20260310,0,0.0,3.07,49.46,0.0,23.36,19.05,5.23,0.65,9.54,19.54,3.52,45.48,7.55,0.78,-11.0,15.55,12.52,2.5,4.88,20.84,17.95
+20260311,0,0.0,0.0,34.47,0.0,25.21,18.39,3.11,1.54,11.27,17.94,3.51,42.79,7.38,0.64,-12.63,12.98,16.47,0.0,4.25,20.76,17.88
+20260313,0,6.53,36.63,24.26,0.0,12.21,20.7,3.59,-10.93,-0.84,19.07,3.93,24.81,6.03,0.82,-6.14,10.65,21.12,0.0,3.64,19.87,18.11
+20260314,0,2.63,2.84,12.43,0.0,18.21,22.12,3.47,-7.8,10.18,7.11,3.4,18.69,8.06,1.01,2.36,9.89,15.46,0.0,2.7,18.64,18.47

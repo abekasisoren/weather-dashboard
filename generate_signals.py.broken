@@ -1,0 +1,627 @@
+import pandas as pdnano generate_signals.pyimport pandas as pd
+
+weather_df = pd.read_csv("weather_values.csv")
+weather = dict(zip(weather_df["metric"], weather_df["value"]))
+
+signals = []
+
+def add_signal(region, signal, market, raw_strength,
+               affected_area, affected_industries,
+               weather_reason, market_reason,
+               recommendation, stock, etf, futures,
+               confidence, risk,
+               commodity_weight, equity_weight,
+               long_stocks="", short_stocks="",
+               long_etfs="", short_etfs=""):
+    weather_score = round(abs(raw_strength), 2)
+    commodity_score = round(abs(raw_strength) * commodity_weight, 2)
+    equity_etf_score = round(abs(raw_strength) * equity_weight, 2)
+
+    trade_raw = (
+        weather_score * 0.25 +
+        commodity_score * 0.45 +
+        equity_etf_score * 0.30
+    )
+    trade_score = min(10, round(trade_raw / 5, 1))
+
+    signals.append({
+        "Region": region,
+        "WeatherSignal": signal,
+        "Market": market,
+        "AffectedArea": affected_area,
+        "AffectedIndustries": affected_industries,
+        "SignalStrength": weather_score,
+        "WeatherScore": weather_score,
+        "CommodityScore": commodity_score,
+        "EquityETFScore": equity_etf_score,
+        "TradeScore": trade_score,
+        "WeatherReasoning": weather_reason,
+        "MarketReasoning": market_reason,
+        "Recommendation": recommendation,
+        "StockIdea": stock,
+        "ETFIdea": etf,
+        "FuturesIdea": futures,
+        "LongStocks": long_stocks,
+        "ShortStocks": short_stocks,
+        "LongETFs": long_etfs,
+        "ShortETFs": short_etfs,
+        "Confidence": confidence,
+        "ModelSource": "area_exposure_model",
+        "RiskNote": risk
+    })
+
+# 1. NW Europe colder revision
+nw_europe_temp_revision = float(weather.get("nw_europe_temp_revision", 0))
+if nw_europe_temp_revision <= -2.0:
+    add_signal(
+        region="NW Europe",
+        signal="Cooling revision",
+        market="Gas / Power",
+        raw_strength=nw_europe_temp_revision,
+        affected_area="Northwest Europe",
+        affected_industries="Natural gas, power generation, utilities, heating demand",
+        weather_reason=f"Forecast temperatures shifted lower by {nw_europe_temp_revision:.1f}°C across Northwest Europe.",
+        market_reason="Colder weather in Northwest Europe can increase heating demand and support gas and power-sensitive assets.",
+        recommendation="BUY / WATCH",
+        stock="LNG",
+        etf="UNG",
+        futures="Natural Gas Futures",
+        confidence="Medium",
+        risk="US gas proxies are imperfect for European gas exposure.",
+        commodity_weight=3.5,
+        equity_weight=1.8,
+        long_stocks="LNG, SHEL, BP",
+        short_stocks="",
+        long_etfs="UNG",
+        short_etfs=""
+    )
+
+# 2. Brazil coffee wetter shift
+brazil_rain_revision = float(weather.get("brazil_rain_revision", 0))
+if brazil_rain_revision >= 4.0:
+    add_signal(
+        region="Brazil Coffee Belt",
+        signal="Wetter shift",
+        market="Coffee",
+        raw_strength=brazil_rain_revision,
+        affected_area="Brazil coffee-growing regions",
+        affected_industries="Coffee supply chain, coffee futures, beverage input costs",
+        weather_reason=f"Rainfall forecasts improved by {brazil_rain_revision:.1f} mm across Brazil coffee regions.",
+        market_reason="Improved rainfall can reduce crop stress and weaken bullish coffee pressure.",
+        recommendation="AVOID / SELL / WATCH",
+        stock="SBUX",
+        etf="JO",
+        futures="Coffee Futures",
+        confidence="Low",
+        risk="Coffee also depends on inventories, FX and crop reports.",
+        commodity_weight=2.5,
+        equity_weight=0.8,
+        long_stocks="",
+        short_stocks="SBUX",
+        long_etfs="",
+        short_etfs="JO"
+    )
+
+# 3. US Corn Belt hot/dry
+cornbelt_hotdry_score = float(weather.get("cornbelt_hotdry_score", 0))
+if cornbelt_hotdry_score >= 4.0:
+    add_signal(
+        region="US Corn Belt",
+        signal="Hot and Dry",
+        market="Corn",
+        raw_strength=cornbelt_hotdry_score,
+        affected_area="US Corn Belt",
+        affected_industries="Corn, fertilizers, agribusiness, crop inputs",
+        weather_reason=f"Hot-dry stress score reached {cornbelt_hotdry_score:.1f}.",
+        market_reason="Higher crop stress in the Corn Belt can support corn prices and crop-linked names.",
+        recommendation="BUY / WATCH",
+        stock="ADM",
+        etf="CORN",
+        futures="Corn Futures",
+        confidence="Medium",
+        risk="Most important during active growing season.",
+        commodity_weight=3.8,
+        equity_weight=1.9,
+        long_stocks="ADM, BG, MOS, NTR, CF",
+        short_stocks="",
+        long_etfs="CORN, MOO",
+        short_etfs=""
+    )
+
+# 4. US Wheat Plains drought
+us_wheat_drought_score = float(weather.get("us_wheat_drought_score", 0))
+if us_wheat_drought_score >= 3.5:
+    add_signal(
+        region="US Wheat Plains",
+        signal="Drought stress",
+        market="Wheat",
+        raw_strength=us_wheat_drought_score,
+        affected_area="US Wheat Plains",
+        affected_industries="Wheat, grain trading, fertilizers, farm inputs",
+        weather_reason=f"Wheat plains drought score reached {us_wheat_drought_score:.1f}.",
+        market_reason="Drier wheat areas can support wheat prices and grain-sensitive names.",
+        recommendation="BUY / WATCH",
+        stock="BG",
+        etf="WEAT",
+        futures="Wheat Futures",
+        confidence="Medium",
+        risk="Timing matters a lot relative to crop stage.",
+        commodity_weight=3.6,
+        equity_weight=1.7,
+        long_stocks="BG, ADM, MOS, NTR, CF",
+        short_stocks="",
+        long_etfs="WEAT, MOO",
+        short_etfs=""
+    )
+
+# 5. Argentina soy dryness
+argentina_soy_dryness = float(weather.get("argentina_soy_dryness", 0))
+if argentina_soy_dryness >= 3.5:
+    add_signal(
+        region="Argentina Pampas",
+        signal="Dryness stress",
+        market="Soy",
+        raw_strength=argentina_soy_dryness,
+        affected_area="Argentina Pampas",
+        affected_industries="Soybeans, agribusiness, fertilizers, crop inputs",
+        weather_reason=f"Argentina soy dryness score reached {argentina_soy_dryness:.1f}.",
+        market_reason="Drier Pampas conditions can support soybean prices and input-sensitive names.",
+        recommendation="BUY / WATCH",
+        stock="BG",
+        etf="SOYB",
+        futures="Soybean Futures",
+        confidence="Medium",
+        risk="South American crop/weather timing matters.",
+        commodity_weight=3.7,
+        equity_weight=1.8,
+        long_stocks="BG, ADM, MOS, NTR, CF",
+        short_stocks="",
+        long_etfs="SOYB, MOO",
+        short_etfs=""
+    )
+
+# 6. West Africa cocoa rainfall shortfall
+west_africa_cocoa_rain = float(weather.get("west_africa_cocoa_rain", 0))
+if west_africa_cocoa_rain <= -3.0:
+    add_signal(
+        region="West Africa Cocoa Belt",
+        signal="Rainfall shortfall",
+        market="Cocoa",
+        raw_strength=west_africa_cocoa_rain,
+        affected_area="Ivory Coast / Ghana cocoa belt",
+        affected_industries="Cocoa supply, chocolate inputs, food manufacturers",
+        weather_reason=f"Rainfall revision dropped by {west_africa_cocoa_rain:.1f} mm in West Africa cocoa regions.",
+        market_reason="Reduced rainfall can support cocoa stress narratives and cocoa-linked pricing pressure.",
+        recommendation="BUY / WATCH",
+        stock="HSY",
+        etf="None",
+        futures="Cocoa Futures",
+        confidence="Low",
+        risk="Cocoa markets are volatile and often inventory-driven.",
+        commodity_weight=3.2,
+        equity_weight=1.0,
+        long_stocks="HSY, MDLZ, GIS",
+        short_stocks="",
+        long_etfs="",
+        short_etfs=""
+    )
+
+# 7. Texas heat revision
+texas_temp_revision = float(weather.get("texas_temp_revision", 0))
+if texas_temp_revision >= 2.0:
+    add_signal(
+        region="Texas",
+        signal="Heat revision",
+        market="Power Demand",
+        raw_strength=texas_temp_revision,
+        affected_area="Texas / ERCOT power region",
+        affected_industries="Utilities, power generation, grid stress, cooling demand",
+        weather_reason=f"Texas temperatures revised higher by {texas_temp_revision:.1f}°C.",
+        market_reason="Higher temperatures can increase cooling demand and support power-sensitive names.",
+        recommendation="WATCH / BUY",
+        stock="VST",
+        etf="XLU",
+        futures="ERCOT Power (proxy only)",
+        confidence="Medium",
+        risk="Public market exposure is indirect.",
+        commodity_weight=2.0,
+        equity_weight=2.2,
+        long_stocks="VST, NRG, SO, DUK",
+        short_stocks="",
+        long_etfs="XLU",
+        short_etfs=""
+    )
+
+# 8. North Atlantic storms
+north_atlantic_storm_index = float(weather.get("north_atlantic_storm_index", 0))
+if north_atlantic_storm_index >= 15:
+    add_signal(
+        region="North Atlantic",
+        signal="Storm intensification",
+        market="Shipping / LNG / Insurance",
+        raw_strength=north_atlantic_storm_index,
+        affected_area="North Atlantic shipping routes",
+        affected_industries="Shipping, LNG transport, marine insurance",
+        weather_reason=f"Storm index reached {north_atlantic_storm_index:.1f}.",
+        market_reason="Stronger North Atlantic storms can disrupt shipping routes, LNG flows and insurance sentiment.",
+        recommendation="WATCH / BUY",
+        stock="FLNG",
+        etf="KIE",
+        futures="Freight / LNG routes",
+        confidence="Medium",
+        risk="Storm effects on listed equities are indirect.",
+        commodity_weight=1.4,
+        equity_weight=1.2,
+        long_stocks="FLNG, LNG, GLNG, TK, STNG",
+        short_stocks="TRV, ALL, CB, HIG",
+        long_etfs="",
+        short_etfs="KIE"
+    )
+
+# 9. Gulf of Mexico storms
+gulf_storm_index = float(weather.get("gulf_storm_index", 0))
+if gulf_storm_index >= 15:
+    add_signal(
+        region="Gulf of Mexico",
+        signal="Storm intensification",
+        market="Oil / Offshore / Insurance",
+        raw_strength=gulf_storm_index,
+        affected_area="Gulf of Mexico / US Gulf Coast",
+        affected_industries="Offshore oil, energy logistics, LNG terminals, insurance, cruises",
+        weather_reason=f"Gulf storm index reached {gulf_storm_index:.1f}.",
+        market_reason="Storm risk in the Gulf can affect offshore operations, energy logistics, insurers and coastal leisure names.",
+        recommendation="WATCH / BUY",
+        stock="SLB",
+        etf="XLE",
+        futures="WTI Crude / Nat Gas",
+        confidence="Low",
+        risk="Storm path matters more than broad regional risk.",
+        commodity_weight=1.5,
+        equity_weight=1.1,
+        long_stocks="SLB, HAL, XOM, CVX, LNG, FLNG",
+        short_stocks="TRV, ALL, HIG, RCL, CCL",
+        long_etfs="XLE, OIH",
+        short_etfs="KIE, JETS"
+    )
+
+if not signals:
+    signals.append({
+        "Region": "None",
+        "WeatherSignal": "No strong signal",
+        "Market": "None",
+        "AffectedArea": "None",
+        "AffectedIndustries": "None",
+        "SignalStrength": 0,
+        "WeatherScore": 0,
+        "CommodityScore": 0,
+        "EquityETFScore": 0,
+        "TradeScore": 0,
+        "WeatherReasoning": "No weather rule crossed the action threshold.",
+        "MarketReasoning": "No market action suggested.",
+        "Recommendation": "NO ACTION",
+        "StockIdea": "None",
+        "ETFIdea": "None",
+        "FuturesIdea": "None",
+        "LongStocks": "",
+        "ShortStocks": "",
+        "LongETFs": "",
+        "ShortETFs": "",
+        "Confidence": "Low",
+        "ModelSource": "area_exposure_model",
+        "RiskNote": "Wait for the next forecast update."
+    })
+
+df = pd.DataFrame(signals)
+df.to_csv("signals.csv", index=False)
+
+print("signals.csv generated with area exposure model")
+print(df[[
+    "Region",
+    "WeatherSignal",
+    "AffectedArea",
+    "AffectedIndustries",
+    "TradeScore",
+    "Recommendation"
+]])import pandas as pd
+
+weather_df = pd.read_csv("weather_values.csv")
+weather = dict(zip(weather_df["metric"], weather_df["value"]))
+
+signals = []
+
+def add_signal(region, signal, market, raw_strength,
+               weather_reason, market_reason,
+               recommendation, stock, etf, futures,
+               confidence, risk,
+               commodity_weight, equity_weight,
+               long_stocks="", short_stocks="",
+               long_etfs="", short_etfs=""):
+    weather_score = round(abs(raw_strength), 2)
+    commodity_score = round(abs(raw_strength) * commodity_weight, 2)
+    equity_etf_score = round(abs(raw_strength) * equity_weight, 2)
+
+    trade_raw = (
+        weather_score * 0.25 +
+        commodity_score * 0.45 +
+        equity_etf_score * 0.30
+    )
+    trade_score = min(10, round(trade_raw / 5, 1))
+
+    signals.append({
+        "Region": region,
+        "WeatherSignal": signal,
+        "Market": market,
+        "SignalStrength": weather_score,
+        "WeatherScore": weather_score,
+        "CommodityScore": commodity_score,
+        "EquityETFScore": equity_etf_score,
+        "TradeScore": trade_score,
+        "WeatherReasoning": weather_reason,
+        "MarketReasoning": market_reason,
+        "Recommendation": recommendation,
+        "StockIdea": stock,
+        "ETFIdea": etf,
+        "FuturesIdea": futures,
+        "LongStocks": long_stocks,
+        "ShortStocks": short_stocks,
+        "LongETFs": long_etfs,
+        "ShortETFs": short_etfs,
+        "Confidence": confidence,
+        "ModelSource": "three_score_model",
+        "RiskNote": risk
+    })
+
+# 1. Europe gas / power
+nw_europe_temp_revision = float(weather.get("nw_europe_temp_revision", 0))
+if nw_europe_temp_revision <= -2.0:
+    add_signal(
+        region="NW Europe",
+        signal="Cooling revision",
+        market="Gas / Power",
+        raw_strength=nw_europe_temp_revision,
+        weather_reason=f"Forecast temperatures shifted lower by {nw_europe_temp_revision:.1f}°C across Northwest Europe.",
+        market_reason="Colder weather can increase heating demand and support gas and power-sensitive assets.",
+        recommendation="BUY / WATCH",
+        stock="LNG",
+        etf="UNG",
+        futures="Natural Gas Futures",
+        confidence="Medium",
+        risk="US gas proxies are imperfect for European gas.",
+        commodity_weight=3.5,
+        equity_weight=1.8,
+        long_stocks="LNG, TTF proxy names, Shell, BP, Equinor",
+        short_stocks="",
+        long_etfs="UNG",
+        short_etfs=""
+    )
+
+# 2. Brazil coffee
+brazil_rain_revision = float(weather.get("brazil_rain_revision", 0))
+if brazil_rain_revision >= 4.0:
+    add_signal(
+        region="Brazil Coffee Belt",
+        signal="Wetter shift",
+        market="Coffee",
+        raw_strength=brazil_rain_revision,
+        weather_reason=f"Rainfall forecasts improved by {brazil_rain_revision:.1f} mm across Brazil coffee regions.",
+        market_reason="Improved rainfall can reduce crop stress and weaken bullish coffee pressure.",
+        recommendation="AVOID / SELL / WATCH",
+        stock="SBUX",
+        etf="None",
+        futures="Coffee Futures",
+        confidence="Low",
+        risk="Coffee also depends on inventories, FX, and crop reports.",
+        commodity_weight=2.5,
+        equity_weight=0.8,
+        long_stocks="",
+        short_stocks="JO, coffee-sensitive longs, weather premium trades",
+        long_etfs="",
+        short_etfs=""
+    )
+
+# 3. Corn
+cornbelt_hotdry_score = float(weather.get("cornbelt_hotdry_score", 0))
+if cornbelt_hotdry_score >= 4.0:
+    add_signal(
+        region="US Corn Belt",
+        signal="Hot and Dry",
+        market="Corn",
+        raw_strength=cornbelt_hotdry_score,
+        weather_reason=f"Hot-dry stress score reached {cornbelt_hotdry_score:.1f}.",
+        market_reason="Higher crop stress can support corn prices and crop-linked names.",
+        recommendation="BUY / WATCH",
+        stock="ADM",
+        etf="CORN",
+        futures="Corn Futures",
+        confidence="Medium",
+        risk="Most important during active growing season.",
+        commodity_weight=3.8,
+        equity_weight=1.9,
+        long_stocks="ADM, BG, MOS, NTR, CF",
+        short_stocks="",
+        long_etfs="CORN, MOO",
+        short_etfs=""
+    )
+
+# 4. Wheat
+us_wheat_drought_score = float(weather.get("us_wheat_drought_score", 0))
+if us_wheat_drought_score >= 3.5:
+    add_signal(
+        region="US Wheat Plains",
+        signal="Drought stress",
+        market="Wheat",
+        raw_strength=us_wheat_drought_score,
+        weather_reason=f"Wheat plains drought score reached {us_wheat_drought_score:.1f}.",
+        market_reason="Drier wheat areas can support wheat prices and grain-sensitive names.",
+        recommendation="BUY / WATCH",
+        stock="BG",
+        etf="WEAT",
+        futures="Wheat Futures",
+        confidence="Medium",
+        risk="Timing matters a lot relative to crop stage.",
+        commodity_weight=3.6,
+        equity_weight=1.7,
+        long_stocks="BG, ADM, MOS, NTR, CF",
+        short_stocks="",
+        long_etfs="WEAT, MOO",
+        short_etfs=""
+    )
+
+# 5. Soy
+argentina_soy_dryness = float(weather.get("argentina_soy_dryness", 0))
+if argentina_soy_dryness >= 3.5:
+    add_signal(
+        region="Argentina Pampas",
+        signal="Dryness stress",
+        market="Soy",
+        raw_strength=argentina_soy_dryness,
+        weather_reason=f"Argentina soy dryness score reached {argentina_soy_dryness:.1f}.",
+        market_reason="Drier Pampas conditions can support soybean prices.",
+        recommendation="BUY / WATCH",
+        stock="BG",
+        etf="SOYB",
+        futures="Soybean Futures",
+        confidence="Medium",
+        risk="South American crop/weather timing matters.",
+        commodity_weight=3.7,
+        equity_weight=1.8,
+        long_stocks="BG, ADM, MOS, NTR, CF",
+        short_stocks="",
+        long_etfs="SOYB, MOO",
+        short_etfs=""
+    )
+
+# 6. Cocoa
+west_africa_cocoa_rain = float(weather.get("west_africa_cocoa_rain", 0))
+if west_africa_cocoa_rain <= -3.0:
+    add_signal(
+        region="West Africa Cocoa Belt",
+        signal="Rainfall shortfall",
+        market="Cocoa",
+        raw_strength=west_africa_cocoa_rain,
+        weather_reason=f"Rainfall revision dropped by {west_africa_cocoa_rain:.1f} mm in West Africa cocoa regions.",
+        market_reason="Reduced rainfall can support cocoa stress narratives and cocoa-sensitive pricing.",
+        recommendation="BUY / WATCH",
+        stock="MDLZ",
+        etf="None",
+        futures="Cocoa Futures",
+        confidence="Low",
+        risk="Cocoa markets are volatile and often inventory-driven.",
+        commodity_weight=3.2,
+        equity_weight=1.0,
+        long_stocks="MDLZ, HSY, GIS",
+        short_stocks="",
+        long_etfs="",
+        short_etfs=""
+    )
+
+# 7. Texas power
+texas_temp_revision = float(weather.get("texas_temp_revision", 0))
+if texas_temp_revision >= 2.0:
+    add_signal(
+        region="Texas",
+        signal="Heat revision",
+        market="Power Demand",
+        raw_strength=texas_temp_revision,
+        weather_reason=f"Texas temperatures revised higher by {texas_temp_revision:.1f}°C.",
+        market_reason="Higher temperatures can increase cooling demand and power stress.",
+        recommendation="WATCH",
+        stock="VST",
+        etf="XLU",
+        futures="ERCOT Power (proxy only)",
+        confidence="Medium",
+        risk="Public market exposure is indirect.",
+        commodity_weight=2.0,
+        equity_weight=2.2,
+        long_stocks="VST, NRG, CEG, SO, DUK",
+        short_stocks="",
+        long_etfs="XLU",
+        short_etfs=""
+    )
+
+# 8. North Atlantic storms
+north_atlantic_storm_index = float(weather.get("north_atlantic_storm_index", 0))
+if north_atlantic_storm_index >= 15:
+    add_signal(
+        region="North Atlantic",
+        signal="Storm intensification",
+        market="Shipping / LNG / Insurance",
+        raw_strength=north_atlantic_storm_index,
+        weather_reason=f"Storm index reached {north_atlantic_storm_index:.1f}.",
+        market_reason="Stronger North Atlantic storms can affect shipping routes, LNG flows, and insurance sentiment.",
+        recommendation="WATCH / BUY",
+        stock="FLNG",
+        etf="None",
+        futures="Freight / LNG routes",
+        confidence="Medium",
+        risk="Storm effects on equities are indirect.",
+        commodity_weight=1.4,
+        equity_weight=1.2,
+        long_stocks="FLNG, LNG, GLNG, TK, STNG",
+        short_stocks="TRV, ALL, CB, HIG",
+        long_etfs="",
+        short_etfs="KIE"
+    )
+
+# 9. Gulf storms
+gulf_storm_index = float(weather.get("gulf_storm_index", 0))
+if gulf_storm_index >= 15:
+    add_signal(
+        region="Gulf of Mexico",
+        signal="Storm intensification",
+        market="Oil / Offshore / Insurance",
+        raw_strength=gulf_storm_index,
+        weather_reason=f"Gulf storm index reached {gulf_storm_index:.1f}.",
+        market_reason="Storm risk in the Gulf can affect offshore operations, energy logistics, and insurance sentiment.",
+        recommendation="WATCH / BUY",
+        stock="SLB",
+        etf="XLE",
+        futures="WTI Crude / Nat Gas",
+        confidence="Low",
+        risk="Storm path matters more than broad regional risk.",
+        commodity_weight=1.5,
+        equity_weight=1.1,
+        long_stocks="SLB, HAL, XOM, CVX, LNG, FLNG",
+        short_stocks="TRV, ALL, HIG, RCL, CCL",
+        long_etfs="XLE, OIH",
+        short_etfs="KIE, JETS"
+    )
+
+if not signals:
+    signals.append({
+        "Region": "None",
+        "WeatherSignal": "No strong signal",
+        "Market": "None",
+        "SignalStrength": 0,
+        "WeatherScore": 0,
+        "CommodityScore": 0,
+        "EquityETFScore": 0,
+        "TradeScore": 0,
+        "WeatherReasoning": "No weather rule crossed the action threshold.",
+        "MarketReasoning": "No market action suggested.",
+        "Recommendation": "NO ACTION",
+        "StockIdea": "None",
+        "ETFIdea": "None",
+        "FuturesIdea": "None",
+        "LongStocks": "",
+        "ShortStocks": "",
+        "LongETFs": "",
+        "ShortETFs": "",
+        "Confidence": "Low",
+        "ModelSource": "three_score_model",
+        "RiskNote": "Wait for the next forecast update."
+    })
+
+df = pd.DataFrame(signals)
+df.to_csv("signals.csv", index=False)
+
+print("signals.csv generated with expanded basket fields")
+print(df[[
+    "Region",
+    "WeatherSignal",
+    "WeatherScore",
+    "CommodityScore",
+    "EquityETFScore",
+    "TradeScore",
+    "Recommendation"
+]])

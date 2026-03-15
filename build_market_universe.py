@@ -1,0 +1,43 @@
+import pandas as pd
+
+rows = [
+    ["XOM", "Exxon Mobil", "NYSE"],
+    ["CVX", "Chevron", "NYSE"],
+    ["SLB", "Schlumberger", "NYSE"],
+    ["HAL", "Halliburton", "NYSE"],
+    ["LNG", "Cheniere Energy", "NYSE"],
+    ["TRV", "Travelers", "NYSE"],
+    ["ALL", "Allstate", "NYSE"],
+    ["CB", "Chubb", "NYSE"],
+    ["HIG", "Hartford", "NYSE"],
+    ["RCL", "Royal Caribbean", "NYSE"],
+    ["CCL", "Carnival", "NYSE"],
+    ["VST", "Vistra", "NYSE"],
+    ["NRG", "NRG Energy", "NYSE"],
+    ["SO", "Southern Company", "NYSE"],
+    ["DUK", "Duke Energy", "NYSE"],
+    ["ADM", "Archer-Daniels-Midland", "NYSE"],
+    ["BG", "Bunge", "NYSE"],
+    ["MOS", "Mosaic", "NYSE"],
+    ["NTR", "Nutrien", "NYSE"],
+    ["CF", "CF Industries", "NYSE"],
+    ["HSY", "Hershey", "NYSE"],
+    ["GIS", "General Mills", "NYSE"],
+    ["XLE", "Energy Select Sector SPDR", "ETF"],
+    ["OIH", "VanEck Oil Services ETF", "ETF"],
+    ["KIE", "SPDR Insurance ETF", "ETF"],
+    ["JETS", "US Global Jets ETF", "ETF"],
+    ["XLU", "Utilities Select Sector SPDR", "ETF"],
+    ["UNG", "United States Natural Gas Fund", "ETF"],
+    ["CORN", "Teucrium Corn Fund", "ETF"],
+    ["WEAT", "Teucrium Wheat Fund", "ETF"],
+    ["SOYB", "Teucrium Soybean Fund", "ETF"],
+    ["MOO", "VanEck Agribusiness ETF", "ETF"],
+]
+
+df = pd.DataFrame(rows, columns=["Ticker", "Name", "Exchange"])
+df.to_csv("market_universe.csv", index=False)
+
+print("market_universe.csv created")
+print("Number of rows:", len(df))
+print(df.head(10))

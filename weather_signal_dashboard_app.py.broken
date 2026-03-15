@@ -1,0 +1,228 @@
+import streamlit as st
+import pandas as pd
+from pathlib import Path
+import os
+import datetime
+
+st.set_page_config(page_title="Weather Trading Dashboard", layout="wide")
+
+st.title("Global Weather Signal Dashboard")
+st.caption("Model-generated weather-to-market recommendations")
+
+signals_file = Path("signals.csv")
+weather_file = Path("weather_values.csv")
+global_shocks_file = Path("global_shocks.csv")
+reaction_file = Path("reaction_log.csv")
+
+
+def show_list_block(title, value):
+    st.write(f"**{title}:**")
+    if pd.isna(value) or str(value).strip() == "":
+        st.write("None")
+        return
+
+    items = [x.strip() for x in str(value).split(",") if x.strip()]
+    for item in items:
+        st.write(f"- {item}")
+
+
+if signals_file.exists():
+    last_update = datetime.datetime.fromtimestamp(os.path.getmtime(signals_file))
+    st.write("Last model update:", last_update)
+
+if weather_file.exists():
+    st.subheader("Current Weather Model Inputs")
+    weather_df = pd.read_csv(weather_file)
+    st.dataframe(weather_df, use_container_width=True)
+
+if not signals_file.exists():
+    st.error("signals.csv not found. Run: python3 generate_signals.py")
+signal_columns = [
+    "Region",
+    "WeatherSignal",
+    "Market",
+    "AffectedArea",
+    "AffectedIndustries",
+    "TradeScore",
+    "Recommendation",
+    "Confidence",
+    "LongStocks",
+    "ShortStocks",
+    "LongETFs",
+    "ShortETFs",
+    "FuturesIdea",
+    "WeatherScore",
+    "CommodityScore",
+    "EquityETFScore"
+]    st.stop()
+
+df = pd.read_csv(signals_file)
+
+st.subheader("Signal Board")
+
+signal_columns = [
+    "Region",
+    "WeatherSignal",
+    "Market",
+    "TradeScore",
+    "Recommendation",
+    "Confidence",
+    "LongStocks",
+    "ShortStocks",
+    "LongETFs",
+    "ShortETFs",
+    "FuturesIdea",
+    "WeatherScore",
+    "CommodityScore",
+    "EquityETFScore"
+]
+
+existing_signal_columns = [c for c in signal_columns if c in df.columns]
+
+st.dataframe(
+    df[existing_signal_columns],
+    use_container_width=True
+)
+
+st.subheader("Detailed Reasoning")
+
+for _, row in df.iterrows():
+    with st.expander(f"{row['Region']} — {row['Market']}", expanded=False):
+        st.write(f"**Recommendation:** {row['Recommendation']}")
+        st.write(f"**Confidence:** {row['Confidence']}")
+if "AffectedArea" in df.columns:
+    st.write(f"**Affected area:** {row['AffectedArea']}")
+if "AffectedIndustries" in df.columns:
+    st.write(f"**Affected industries:** {row['AffectedIndustries']}")
+        if "TradeScore" in df.columns:
+            st.write(f"**Trade score (1-10):** {row['TradeScore']}")
+        if "WeatherScore" in df.columns:
+            st.write(f"**Weather score:** {row['WeatherScore']}")
+        if "CommodityScore" in df.columns:
+            st.write(f"**Commodity score:** {row['CommodityScore']}")
+        if "EquityETFScore" in df.columns:
+            st.write(f"**Equity / ETF score:** {row['EquityETFScore']}")
+
+        st.markdown("### Expected Market Basket")
+
+        if "LongStocks" in df.columns:
+            show_list_block("Expected long stocks", row["LongStocks"])
+        elif "StockIdea" in df.columns:
+            st.write(f"**Stock idea (old format):** {row['StockIdea']}")
+
+        if "ShortStocks" in df.columns:
+            show_list_block("Expected short stocks", row["ShortStocks"])
+
+        if "LongETFs" in df.columns:
+            show_list_block("Expected long ETFs", row["LongETFs"])
+        elif "ETFIdea" in df.columns:
+            st.write(f"**ETF idea (old format):** {row['ETFIdea']}")
+
+        if "ShortETFs" in df.columns:
+            show_list_block("Expected short ETFs", row["ShortETFs"])
+
+        if "FuturesIdea" in df.columns:
+            st.write(f"**Futures / commodity idea:** {row['FuturesIdea']}")
+
+        st.markdown("### Reasoning")
+        if "WeatherReasoning" in df.columns:
+            st.write(f"**Weather reasoning:** {row['WeatherReasoning']}")
+        if "MarketReasoning" in df.columns:
+            st.write(f"**Market reasoning:** {row['MarketReasoning']}")
+        if "RiskNote" in df.columns:
+            st.write(f"**Risk note:** {row['RiskNote']}")
+        if "ModelSource" in df.columns:
+            st.write(f"**Source:** {row['ModelSource']}")
+
+        # New: show reaction history for this exact signal
+        if reaction_file.exists():
+            reaction_df = pd.read_csv(reaction_file)
+
+            match_df = reaction_df[
+                (reaction_df["Region"] == row["Region"]) &
+                (reaction_df["WeatherSignal"] == row["WeatherSignal"])
+            ].copy()
+
+            if not match_df.empty:
+                st.markdown("### Market Reaction Tracker")
+
+                reaction_columns = [
+                    "Date",
+                    "Ticker",
+                    "Name",
+                    "Exchange",
+                    "EntryPrice",
+                    "Return1D_pct",
+                    "Return3D_pct",
+                    "Return7D_pct"
+                ]
+                existing_reaction_columns = [c for c in reaction_columns if c in match_df.columns]
+
+                st.dataframe(
+                    match_df[existing_reaction_columns].sort_values(
+                        by=["Date", "Return3D_pct"],
+                        ascending=[False, False]
+                    ),
+                    use_container_width=True
+                )
+
+                # top positive / negative movers
+                if "Return3D_pct" in match_df.columns:
+                    st.markdown("### Top 5 Positive Reactors (3D)")
+                    top_pos = match_df.sort_values("Return3D_pct", ascending=False).head(5)
+                    st.dataframe(
+                        top_pos[["Ticker", "Name", "Return3D_pct"]],
+                        use_container_width=True
+                    )
+
+                    st.markdown("### Top 5 Negative Reactors (3D)")
+                    top_neg = match_df.sort_values("Return3D_pct", ascending=True).head(5)
+                    st.dataframe(
+                        top_neg[["Ticker", "Name", "Return3D_pct"]],
+                        use_container_width=True
+                    )
+            else:
+                st.info("No reaction history yet for this signal.")
+        else:
+            st.info("reaction_log.csv not found yet. Run: python3 track_reactions.py")
+
+if global_shocks_file.exists():
+    global_df = pd.read_csv(global_shocks_file)
+
+    st.subheader("Global Weather Shock Scanner")
+    st.write("Biggest forecast changes anywhere on Earth, linked to possible markets.")
+
+    shock_columns = [
+        "type",
+        "macro_region",
+        "lat",
+        "lon_normal",
+        "value",
+        "Market",
+        "Assets",
+        "TradePriority"
+    ]
+
+    existing_shock_columns = [c for c in shock_columns if c in global_df.columns]
+
+    st.dataframe(
+        global_df[existing_shock_columns].head(30),
+        use_container_width=True
+    )
+
+    st.subheader("Top Global Shocks")
+
+    for _, row in global_df.head(10).iterrows():
+        text = (
+            f"**{row['type']}** in **{row['macro_region']}**  \n"
+            f"Location: lat {row['lat']:.2f}, lon {row['lon_normal']:.2f}  \n"
+            f"Shock value: {row['value']:.2f}  \n"
+            f"Possible market: {row['Market']}  \n"
+            f"Assets to watch: {row['Assets']}"
+        )
+        if "TradePriority" in global_df.columns:
+            text += f"  \n**Trade priority:** {row['TradePriority']}"
+        st.markdown(text)
+        st.markdown("---")
+else:
+    st.info("global_shocks.csv not found yet. Run: python3 generate_global_shocks.py")
