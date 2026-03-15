@@ -9,16 +9,20 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 st.set_page_config(page_title="Global Weather Signal Dashboard", layout="wide")
 
 st.title("Global Weather Signal Dashboard")
-st.caption("Show only the important things: high-score signals and watchlist items with full logic.")
+st.caption("Early weather intelligence for markets: what changed, why it matters, and what to do.")
 
 if not DATABASE_URL:
     st.error("DATABASE_URL environment variable is not set.")
     st.stop()
 
 
-def read_sql(query):
+def read_sql(query: str) -> pd.DataFrame:
     with psycopg.connect(DATABASE_URL) as conn:
-        return pd.read_sql(query, conn)
+        cur = conn.cursor()
+        cur.execute(query)
+        rows = cur.fetchall()
+        cols = [desc[0] for desc in cur.description]
+        return pd.DataFrame(rows, columns=cols)
 
 
 try:
@@ -26,15 +30,27 @@ try:
         SELECT
             region,
             weather_event,
-            score,
+            signal_level,
             recommendation,
-            weather_logic,
-            market_logic,
+            current_value,
+            prior_avg_value,
+            delta_value,
+            what_changed,
+            why_it_matters,
+            affected_market,
             best_vehicle,
             proxy_equities,
+            what_to_watch_next,
             updated_at
         FROM weather_signals
-        ORDER BY score DESC, region ASC
+        ORDER BY
+            CASE signal_level
+                WHEN 'HIGH CONVICTION' THEN 1
+                WHEN 'ACTIONABLE' THEN 2
+                WHEN 'EARLY SIGNAL' THEN 3
+                ELSE 4
+            END,
+            region ASC
     """)
 except Exception as e:
     st.error(f"Could not read weather_signals from database: {e}")
@@ -43,29 +59,29 @@ except Exception as e:
 try:
     global_shocks = read_sql("""
         SELECT
-            shock_type,
             macro_region,
-            magnitude,
-            score,
+            shock_type,
+            signal_level,
             recommendation,
-            market,
-            affected_industries,
+            magnitude,
+            what_changed,
+            why_it_matters,
+            affected_market,
             best_vehicle,
             proxy_equities,
-            weather_logic,
-            market_logic,
             updated_at
         FROM weather_global_shocks
-        ORDER BY score DESC, macro_region ASC
+        ORDER BY
+            CASE signal_level
+                WHEN 'HIGH CONVICTION' THEN 1
+                WHEN 'ACTIONABLE' THEN 2
+                WHEN 'EARLY SIGNAL' THEN 3
+                ELSE 4
+            END,
+            macro_region ASC
     """)
 except Exception:
     global_shocks = pd.DataFrame()
-
-if not signals.empty:
-    signals["score"] = pd.to_numeric(signals["score"], errors="coerce")
-
-if not global_shocks.empty:
-    global_shocks["score"] = pd.to_numeric(global_shocks["score"], errors="coerce")
 
 last_updates = []
 if not signals.empty and "updated_at" in signals.columns:
@@ -76,85 +92,104 @@ if not global_shocks.empty and "updated_at" in global_shocks.columns:
 if last_updates:
     st.write("Last update:", max(last_updates))
 
-actionable_signals = signals[signals["score"] >= 8].copy() if not signals.empty else pd.DataFrame()
-watchlist_signals = signals[(signals["score"] >= 6) & (signals["score"] < 8)].copy() if not signals.empty else pd.DataFrame()
-actionable_shocks = global_shocks[global_shocks["score"] >= 8].copy() if not global_shocks.empty else pd.DataFrame()
-watchlist_shocks = global_shocks[(global_shocks["score"] >= 6) & (global_shocks["score"] < 8)].copy() if not global_shocks.empty else pd.DataFrame()
 
-st.header("🔥 Top Actionable Signals")
+def show_signal_block(title, row):
+    st.markdown(f"### {title}")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Signal Level", row["signal_level"])
+    c2.metric("Action", row["recommendation"])
+    c3.metric("Best Vehicle", row["best_vehicle"])
+
+    with st.expander("Full explanation"):
+        st.markdown("**What changed**")
+        st.write(row["what_changed"])
+
+        st.markdown("**Why it matters**")
+        st.write(row["why_it_matters"])
+
+        st.markdown("**Affected market**")
+        st.write(row["affected_market"])
+
+        st.markdown("**Proxy equities**")
+        st.write(row["proxy_equities"])
+
+        if "what_to_watch_next" in row.index:
+            st.markdown("**What to watch next**")
+            st.write(row["what_to_watch_next"])
+
+    st.divider()
+
+
+high_conviction_signals = signals[signals["signal_level"] == "HIGH CONVICTION"].copy() if not signals.empty else pd.DataFrame()
+actionable_signals = signals[signals["signal_level"] == "ACTIONABLE"].copy() if not signals.empty else pd.DataFrame()
+early_signals = signals[signals["signal_level"] == "EARLY SIGNAL"].copy() if not signals.empty else pd.DataFrame()
+
+high_conviction_shocks = global_shocks[global_shocks["signal_level"] == "HIGH CONVICTION"].copy() if not global_shocks.empty else pd.DataFrame()
+actionable_shocks = global_shocks[global_shocks["signal_level"] == "ACTIONABLE"].copy() if not global_shocks.empty else pd.DataFrame()
+early_shocks = global_shocks[global_shocks["signal_level"] == "EARLY SIGNAL"].copy() if not global_shocks.empty else pd.DataFrame()
+
+st.header("🔥 High Conviction")
+
+if high_conviction_signals.empty and high_conviction_shocks.empty:
+    st.write("No high-conviction weather trades right now.")
+else:
+    if not high_conviction_signals.empty:
+        st.subheader("Industry / Stock Signals")
+        for _, row in high_conviction_signals.iterrows():
+            show_signal_block(f"{row['region']} — {row['weather_event']}", row)
+
+    if not high_conviction_shocks.empty:
+        st.subheader("Global Weather Radar")
+        for _, row in high_conviction_shocks.iterrows():
+            show_signal_block(f"{row['macro_region']} — {row['shock_type']}", row)
+
+st.header("⚠️ Actionable")
 
 if actionable_signals.empty and actionable_shocks.empty:
-    st.write("No high-conviction opportunities right now.")
+    st.write("No actionable setups right now.")
 else:
     if not actionable_signals.empty:
-        st.subheader("Trade Signals")
         for _, row in actionable_signals.iterrows():
-            st.markdown(f"### {row['region']} — {row['weather_event']}")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Score", f"{row['score']:.2f}")
-            c2.metric("Action", row["recommendation"])
-            c3.metric("Best Vehicle", row["best_vehicle"])
-
-            with st.expander("Full explanation"):
-                st.markdown("**Weather Logic**")
-                st.write(row["weather_logic"])
-                st.markdown("**Market Logic**")
-                st.write(row["market_logic"])
-                st.markdown("**Proxy Equities**")
-                st.write(row["proxy_equities"])
-            st.divider()
+            show_signal_block(f"{row['region']} — {row['weather_event']}", row)
 
     if not actionable_shocks.empty:
-        st.subheader("Global Shock Radar")
         for _, row in actionable_shocks.iterrows():
-            st.markdown(f"### {row['macro_region']} — {str(row['shock_type']).upper()} shock")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Score", f"{row['score']:.2f}")
-            c2.metric("Action", row["recommendation"])
-            c3.metric("Best Vehicle", row["best_vehicle"])
+            show_signal_block(f"{row['macro_region']} — {row['shock_type']}", row)
 
-            with st.expander("Full explanation"):
-                st.markdown("**Weather Logic**")
-                st.write(row["weather_logic"])
-                st.markdown("**Market Logic**")
-                st.write(row["market_logic"])
-                st.markdown("**Affected Industries**")
-                st.write(row["affected_industries"])
-                st.markdown("**Proxy Equities**")
-                st.write(row["proxy_equities"])
-            st.divider()
+st.header("👀 Early Signals")
 
-st.header("👀 Watchlist")
-
-if watchlist_signals.empty and watchlist_shocks.empty:
-    st.write("No watchlist items right now.")
+if early_signals.empty and early_shocks.empty:
+    st.write("No early signals right now.")
 else:
-    if not watchlist_signals.empty:
-        st.subheader("Signal Watchlist")
-        for _, row in watchlist_signals.iterrows():
-            with st.expander(f"{row['region']} — {row['weather_event']} | Score {row['score']:.2f}"):
-                st.markdown("**Weather Logic**")
-                st.write(row["weather_logic"])
-                st.markdown("**Market Logic**")
-                st.write(row["market_logic"])
-                st.markdown("**Best Vehicle**")
+    if not early_signals.empty:
+        for _, row in early_signals.iterrows():
+            with st.expander(f"{row['region']} — {row['weather_event']}"):
+                st.markdown("**What changed**")
+                st.write(row["what_changed"])
+                st.markdown("**Why it matters**")
+                st.write(row["why_it_matters"])
+                st.markdown("**Affected market**")
+                st.write(row["affected_market"])
+                st.markdown("**Best vehicle**")
                 st.write(row["best_vehicle"])
-                st.markdown("**Proxy Equities**")
+                st.markdown("**Proxy equities**")
                 st.write(row["proxy_equities"])
+                st.markdown("**What to watch next**")
+                st.write(row["what_to_watch_next"])
 
-    if not watchlist_shocks.empty:
-        st.subheader("Global Shock Watchlist")
-        for _, row in watchlist_shocks.iterrows():
-            with st.expander(f"{row['macro_region']} — {str(row['shock_type']).upper()} shock | Score {row['score']:.2f}"):
-                st.markdown("**Weather Logic**")
-                st.write(row["weather_logic"])
-                st.markdown("**Market Logic**")
-                st.write(row["market_logic"])
-                st.markdown("**Affected Industries**")
-                st.write(row["affected_industries"])
-                st.markdown("**Best Vehicle**")
+    if not early_shocks.empty:
+        for _, row in early_shocks.iterrows():
+            with st.expander(f"{row['macro_region']} — {row['shock_type']}"):
+                st.markdown("**What changed**")
+                st.write(row["what_changed"])
+                st.markdown("**Why it matters**")
+                st.write(row["why_it_matters"])
+                st.markdown("**Affected market**")
+                st.write(row["affected_market"])
+                st.markdown("**Best vehicle**")
                 st.write(row["best_vehicle"])
-                st.markdown("**Proxy Equities**")
+                st.markdown("**Proxy equities**")
                 st.write(row["proxy_equities"])
 
 with st.expander("Raw weather_signals table"):

@@ -68,102 +68,79 @@ def macro_region(lat, lon):
     return "Other"
 
 
-def market_mapping(shock_type, lat, lon, magnitude):
+def market_mapping(shock_type, lat, lon):
     region = macro_region(lat, lon)
 
     if shock_type == "storm":
         if region in ["Caribbean / Gulf"]:
             return {
-                "market": "Storm / Offshore Energy / Insurance",
-                "affected_industries": "Offshore energy, LNG terminals, insurers, cruise lines, airlines",
-                "best_vehicle": "Energy / Insurance Basket",
+                "affected_market": "Offshore energy, LNG, insurance, airlines, cruises",
+                "best_vehicle": "Energy / insurance basket",
                 "proxy_equities": "SLB, HAL, XOM, CVX, LNG, FLNG, TRV, ALL, HIG",
-                "weather_logic": "Wind and pressure signals suggest storm risk intensification.",
-                "market_logic": "Storms in the Gulf can disrupt offshore production and raise insurance/travel risk."
+                "why_it_matters": "A strengthening storm setup here can become a mainstream energy and insurance story quickly."
             }
         if region in ["North Atlantic", "NW Pacific"]:
             return {
-                "market": "Storm / Shipping / Insurance",
-                "affected_industries": "Shipping, marine insurers, airlines, coastal logistics",
-                "best_vehicle": "Shipping / Insurance Basket",
+                "affected_market": "Shipping, marine insurers, airlines",
+                "best_vehicle": "Shipping / insurance basket",
                 "proxy_equities": "STNG, TK, FLNG, ZIM, TRV, ALL, HIG",
-                "weather_logic": "Storm intensity metrics are spiking across key ocean routes.",
-                "market_logic": "Shipping and insurance are sensitive to rising storm disruption."
+                "why_it_matters": "Storm intensification on major ocean routes can become a freight and insurance story."
             }
         return {
-            "market": "Storm / Logistics",
-            "affected_industries": "Shipping, insurers, logistics",
-            "best_vehicle": "Logistics / Insurance Basket",
-            "proxy_equities": "STNG, TK, FLNG, TRV, ALL, HIG",
-            "weather_logic": "Storm metrics are rising materially in this region.",
-            "market_logic": "Logistics and insurers become sensitive when storm disruption increases."
-        }
-
-    if shock_type == "heat":
-        return {
-            "market": "Heat / Power Demand / Utilities",
-            "affected_industries": "Utilities, power demand, natural gas, cooling load",
-            "best_vehicle": "Utilities / Power",
-            "proxy_equities": "VST, NRG, XLU, DUK, SO, LNG",
-            "weather_logic": "Temperature forecasts are moving sharply hotter.",
-            "market_logic": "Higher temperatures can lift cooling demand and strain power systems."
-        }
-
-    if shock_type == "cold":
-        return {
-            "market": "Cold / Gas / Power",
-            "affected_industries": "Natural gas, heating demand, power generation",
-            "best_vehicle": "Natural Gas / Power",
-            "proxy_equities": "UNG, LNG, SHEL, BP",
-            "weather_logic": "Temperature forecasts are turning sharply colder.",
-            "market_logic": "Colder conditions can raise heating demand and energy sensitivity."
+            "affected_market": "Logistics, shipping, insurers",
+            "best_vehicle": "Logistics / insurance basket",
+            "proxy_equities": "STNG, TK, TRV, ALL, HIG",
+            "why_it_matters": "A stronger storm setup can disrupt logistics and raise insurance sensitivity."
         }
 
     if shock_type == "dry":
         return {
-            "market": "Dryness / Agriculture",
-            "affected_industries": "Grains, oilseeds, fertilizers, agribusiness",
-            "best_vehicle": "Commodity / Agriculture",
+            "affected_market": "Agriculture, fertilizers, agribusiness",
+            "best_vehicle": "Commodity / agriculture",
             "proxy_equities": "ADM, BG, NTR, MOS, CF",
-            "weather_logic": "Rainfall forecasts are collapsing and dryness risk is increasing.",
-            "market_logic": "Dryness can tighten crop supply expectations and lift agriculture sensitivity."
+            "why_it_matters": "A drying weather anomaly can become a crop-stress story if it persists."
         }
 
     if shock_type == "wet":
         return {
-            "market": "Flood / Logistics / Crop Disruption",
-            "affected_industries": "Logistics, ports, crops, insurers",
-            "best_vehicle": "Logistics / Insurance",
+            "affected_market": "Logistics, ports, crops, insurers",
+            "best_vehicle": "Logistics / insurance",
             "proxy_equities": "ZIM, STNG, TK, TRV, ALL, HIG",
-            "weather_logic": "Rainfall forecasts are surging and flood risk is building.",
-            "market_logic": "Flooding can disrupt logistics, ports, crops and insurance exposure."
+            "why_it_matters": "A wet anomaly can become a flood and logistics disruption story."
+        }
+
+    if shock_type == "heat":
+        return {
+            "affected_market": "Utilities, power demand, natural gas",
+            "best_vehicle": "Utilities / power",
+            "proxy_equities": "VST, NRG, XLU, DUK, SO, LNG",
+            "why_it_matters": "A hotter anomaly can become a power-demand story."
+        }
+
+    if shock_type == "cold":
+        return {
+            "affected_market": "Natural gas, power generation, heating demand",
+            "best_vehicle": "Natural gas / power",
+            "proxy_equities": "UNG, LNG, SHEL, BP",
+            "why_it_matters": "A colder anomaly can become a heating-demand and energy story."
         }
 
     return {
-        "market": "General Weather",
-        "affected_industries": "Multi-sector weather sensitivity",
+        "affected_market": "General weather-sensitive sectors",
         "best_vehicle": "Mixed",
         "proxy_equities": "Mixed",
-        "weather_logic": "Material weather anomaly detected.",
-        "market_logic": "Weather change could influence multiple sectors."
+        "why_it_matters": "This weather anomaly may matter if it persists."
     }
 
 
-def score_shock(shock_type, magnitude, region):
-    if shock_type == "storm":
-        base = min(10.0, magnitude / 12.0)
-    elif shock_type in ["heat", "cold"]:
-        base = min(10.0, abs(magnitude) / 1.2)
-    else:
-        base = min(10.0, abs(magnitude) / 5.0)
-
-    market_bonus = 0.0
-    if region in ["North America", "South America", "Europe", "North Atlantic", "Caribbean / Gulf"]:
-        market_bonus = 1.0
-    elif region in ["Asia", "SE Asia / Australia", "NW Pacific"]:
-        market_bonus = 0.7
-
-    return round(min(10.0, base + market_bonus), 2)
+def signal_level(change_material: bool, outcome_material: bool):
+    if change_material and outcome_material:
+        return "HIGH CONVICTION", "ACT"
+    if change_material or outcome_material:
+        if change_material:
+            return "EARLY SIGNAL", "WATCH"
+        return "ACTIONABLE", "PREPARE"
+    return None, None
 
 
 found = []
@@ -233,64 +210,86 @@ lons = cur_t2m.longitude.values
 rows = []
 
 
-def add_row(shock_type, lat, lon, magnitude):
-    region = macro_region(lat, lon)
-    mapping = market_mapping(shock_type, lat, lon, magnitude)
-    score = score_shock(shock_type, magnitude, region)
-
-    if score < 5:
+def add_cluster_signal(shock_type, lat, lon, magnitude, change_material, outcome_material):
+    level, recommendation = signal_level(change_material, outcome_material)
+    if level is None:
         return
 
-    recommendation = "TRADE" if score >= 8 else "WATCH"
+    region = macro_region(lat, lon)
+    mapping = market_mapping(shock_type, lat, lon)
 
     rows.append({
-        "shock_type": shock_type,
         "macro_region": region,
-        "lat": round(lat, 2),
-        "lon_normal": round(normalize_lon(float(lon)), 2),
-        "magnitude": round(float(magnitude), 2),
-        "score": score,
+        "shock_type": shock_type.upper(),
+        "signal_level": level,
         "recommendation": recommendation,
-        "market": mapping["market"],
-        "affected_industries": mapping["affected_industries"],
+        "magnitude": round(float(magnitude), 2),
+        "what_changed": f"{shock_type.upper()} anomaly detected with magnitude {float(magnitude):.2f}.",
+        "why_it_matters": mapping["why_it_matters"],
+        "affected_market": mapping["affected_market"],
         "best_vehicle": mapping["best_vehicle"],
         "proxy_equities": mapping["proxy_equities"],
-        "weather_logic": mapping["weather_logic"],
-        "market_logic": mapping["market_logic"],
         "updated_at": datetime.now(timezone.utc),
     })
 
 
-# Heat shocks
-for i, j in np.argwhere(temp_delta >= 4.0):
-    add_row("heat", float(lats[i]), float(lons[j]), float(temp_delta[i, j]))
+# Representative cluster logic: one signal per shock type per macro region
+seen = set()
 
-# Cold shocks
-for i, j in np.argwhere(temp_delta <= -4.0):
-    add_row("cold", float(lats[i]), float(lons[j]), float(temp_delta[i, j]))
+def process_grid(shock_type, indices, magnitude_array):
+    for i, j in indices:
+        lat = float(lats[i])
+        lon = float(lons[j])
+        region = macro_region(lat, lon)
+        key = (shock_type, region)
 
-# Wet shocks
-for i, j in np.argwhere(precip_delta >= 15.0):
-    add_row("wet", float(lats[i]), float(lons[j]), float(precip_delta[i, j]))
+        if key in seen:
+            continue
 
-# Dry shocks
-for i, j in np.argwhere(precip_delta <= -15.0):
-    add_row("dry", float(lats[i]), float(lons[j]), float(precip_delta[i, j]))
+        magnitude = float(magnitude_array[i, j])
 
-# Storm shocks
+        if shock_type in ["dry", "wet"]:
+            change_material = abs(magnitude) >= 15.0
+            outcome_material = abs(magnitude) >= 25.0
+        elif shock_type in ["heat", "cold"]:
+            change_material = abs(magnitude) >= 4.0
+            outcome_material = abs(magnitude) >= 6.0
+        else:
+            change_material = abs(magnitude) >= 10.0
+            outcome_material = abs(magnitude) >= 20.0
+
+        add_cluster_signal(shock_type, lat, lon, magnitude, change_material, outcome_material)
+        seen.add(key)
+
+# Heat
+process_grid("heat", np.argwhere(temp_delta >= 4.0), temp_delta)
+
+# Cold
+process_grid("cold", np.argwhere(temp_delta <= -4.0), temp_delta)
+
+# Wet
+process_grid("wet", np.argwhere(precip_delta >= 15.0), precip_delta)
+
+# Dry
+process_grid("dry", np.argwhere(precip_delta <= -15.0), precip_delta)
+
+# Storm
 storm_score = np.maximum(wind_delta, 0) * 2.5 + np.maximum(-msl_delta, 0) * 2.0
-for i, j in np.argwhere(storm_score >= 10.0):
-    add_row("storm", float(lats[i]), float(lons[j]), float(storm_score[i, j]))
+process_grid("storm", np.argwhere(storm_score >= 10.0), storm_score)
 
 df = pd.DataFrame(rows)
 
 if not df.empty:
-    df["abs_mag"] = df["magnitude"].abs()
+    level_rank = {
+        "HIGH CONVICTION": 0,
+        "ACTIONABLE": 1,
+        "EARLY SIGNAL": 2,
+    }
+    df["level_rank"] = df["signal_level"].map(level_rank)
     df = (
-        df.sort_values(["score", "abs_mag"], ascending=[False, False])
-        .drop_duplicates(subset=["shock_type", "macro_region"], keep="first")
-        .drop(columns=["abs_mag"])
-        .head(10)
+        df.sort_values(by=["level_rank", "macro_region", "shock_type"])
+        .drop(columns=["level_rank"])
+        .head(12)
         .reset_index(drop=True)
     )
 
@@ -299,19 +298,16 @@ with psycopg.connect(DATABASE_URL) as conn:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS weather_global_shocks (
                 id BIGSERIAL PRIMARY KEY,
-                shock_type TEXT NOT NULL,
                 macro_region TEXT NOT NULL,
-                lat DOUBLE PRECISION NOT NULL,
-                lon_normal DOUBLE PRECISION NOT NULL,
-                magnitude DOUBLE PRECISION NOT NULL,
-                score DOUBLE PRECISION NOT NULL,
+                shock_type TEXT NOT NULL,
+                signal_level TEXT NOT NULL,
                 recommendation TEXT NOT NULL,
-                market TEXT NOT NULL,
-                affected_industries TEXT NOT NULL,
+                magnitude DOUBLE PRECISION NOT NULL,
+                what_changed TEXT NOT NULL,
+                why_it_matters TEXT NOT NULL,
+                affected_market TEXT NOT NULL,
                 best_vehicle TEXT NOT NULL,
                 proxy_equities TEXT NOT NULL,
-                weather_logic TEXT NOT NULL,
-                market_logic TEXT NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL
             )
         """)
@@ -321,37 +317,31 @@ with psycopg.connect(DATABASE_URL) as conn:
         if not df.empty:
             cur.executemany("""
                 INSERT INTO weather_global_shocks (
-                    shock_type,
                     macro_region,
-                    lat,
-                    lon_normal,
-                    magnitude,
-                    score,
+                    shock_type,
+                    signal_level,
                     recommendation,
-                    market,
-                    affected_industries,
+                    magnitude,
+                    what_changed,
+                    why_it_matters,
+                    affected_market,
                     best_vehicle,
                     proxy_equities,
-                    weather_logic,
-                    market_logic,
                     updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, [
                 (
-                    r["shock_type"],
                     r["macro_region"],
-                    float(r["lat"]),
-                    float(r["lon_normal"]),
-                    float(r["magnitude"]),
-                    float(r["score"]),
+                    r["shock_type"],
+                    r["signal_level"],
                     r["recommendation"],
-                    r["market"],
-                    r["affected_industries"],
+                    float(r["magnitude"]),
+                    r["what_changed"],
+                    r["why_it_matters"],
+                    r["affected_market"],
                     r["best_vehicle"],
                     r["proxy_equities"],
-                    r["weather_logic"],
-                    r["market_logic"],
                     r["updated_at"],
                 )
                 for _, r in df.iterrows()
@@ -361,6 +351,11 @@ with psycopg.connect(DATABASE_URL) as conn:
 
 print("weather_global_shocks table updated in Postgres")
 if df.empty:
-    print("No global shocks above threshold")
+    print("No global weather radar items this run")
 else:
-    print(df[["shock_type", "macro_region", "score", "recommendation"]].to_string(index=False))
+    print(df[[
+        "macro_region",
+        "shock_type",
+        "signal_level",
+        "recommendation"
+    ]].to_string(index=False))
