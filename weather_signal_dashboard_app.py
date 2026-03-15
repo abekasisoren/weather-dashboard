@@ -79,6 +79,15 @@ def safe_int(value, default=0) -> int:
         return default
 
 
+def safe_float(value, default=None):
+    try:
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
 def score_bucket(score: int) -> str:
     if score >= 8:
         return "HIGH"
@@ -100,14 +109,13 @@ def trade_label_from_bias(value: str) -> str:
 
 def normalize_anomaly_key(value: str) -> str:
     raw = normalize_text(value, "").lower().strip()
-
     mapping = {
         "heatwave": "heatwave",
         "extreme_heat": "heatwave",
         "drought": "drought",
         "frost": "cold_wave",
         "heavy_rain": "flood",
-        "storm_wind": "tornado",
+        "storm_wind": "storm_wind",
         "hurricane": "hurricane",
         "wildfire": "wildfire",
         "tornado": "tornado",
@@ -118,8 +126,7 @@ def normalize_anomaly_key(value: str) -> str:
 
 
 def get_market_map_for_row(row) -> dict:
-    anomaly_key = normalize_anomaly_key(row.get("anomaly_type"))
-    return WEATHER_MARKET_MAP.get(anomaly_key, {})
+    return WEATHER_MARKET_MAP.get(normalize_anomaly_key(row.get("anomaly_type")), {})
 
 
 def infer_trade(row) -> str:
@@ -129,14 +136,10 @@ def infer_trade(row) -> str:
 
     anomaly_key = normalize_anomaly_key(row.get("anomaly_type"))
     commodity = normalize_text(row.get("commodity"), "").lower()
-
     market_map = WEATHER_MARKET_MAP.get(anomaly_key, {})
     commodities = [c.lower() for c in market_map.get("commodities", [])]
 
     if commodity and commodity in commodities:
-        return "Long"
-
-    if anomaly_key in {"heatwave", "drought", "cold_wave"} and commodity:
         return "Long"
 
     if anomaly_key == "flood" and commodity in {"corn", "soybeans", "wheat", "coffee", "sugar"}:
@@ -170,44 +173,34 @@ def build_title(row) -> str:
 
 
 def get_vehicle(row) -> str:
-    existing = normalize_text(row.get("best_vehicle"), "")
-    if existing:
-        return existing
-
     commodity = normalize_text(row.get("commodity"), "")
-    if commodity and commodity != "-":
-        commodity_vehicle_map = {
-            "Corn": "Corn futures / CORN ETF",
-            "Soybeans": "Soybean futures / SOYB ETF",
-            "Wheat": "Wheat futures / WEAT ETF",
-            "Coffee": "Coffee futures / JO ETF",
-            "Sugar": "Sugar futures / CANE ETF",
-            "Natural Gas": "Natural gas futures / UNG ETF",
-            "Rice": "Rice futures / agri proxies",
-            "Coal": "Coal producers basket",
-            "Power Utilities": "European utilities basket",
-        }
-        return commodity_vehicle_map.get(commodity, commodity)
-
-    return "-"
+    vehicle_map = {
+        "Corn": "Corn futures / CORN ETF",
+        "Soybeans": "Soybean futures / SOYB ETF",
+        "Wheat": "Wheat futures / WEAT ETF",
+        "Coffee": "Coffee futures / JO ETF",
+        "Sugar": "Sugar futures / CANE ETF",
+        "Natural Gas": "Natural gas futures / UNG ETF",
+        "Rice": "Rice futures / agri proxies",
+        "Coal": "Coal producers basket",
+        "Power Utilities": "European utilities basket",
+    }
+    return vehicle_map.get(commodity, commodity if commodity else "-")
 
 
-def get_sector_longs(row) -> list[str]:
-    market_map = get_market_map_for_row(row)
-    return market_map.get("equities_long", [])
+def get_equities_long(row) -> list[str]:
+    return get_market_map_for_row(row).get("equities_long", [])
 
 
-def get_sector_shorts(row) -> list[str]:
-    market_map = get_market_map_for_row(row)
-    return market_map.get("equities_short", [])
+def get_equities_short(row) -> list[str]:
+    return get_market_map_for_row(row).get("equities_short", [])
 
 
 def get_sectors(row) -> list[str]:
-    market_map = get_market_map_for_row(row)
-    return market_map.get("sectors", [])
+    return get_market_map_for_row(row).get("sectors", [])
 
 
-def get_commodity_recommendation(row) -> str:
+def get_commodity_trade(row) -> str:
     commodity = normalize_text(row.get("commodity"), "")
     trade = infer_trade(row)
     if commodity == "-":
@@ -219,10 +212,10 @@ def get_commodity_recommendation(row) -> str:
     return f"Watch {commodity}"
 
 
-def get_stock_recommendation(row) -> str:
+def get_stock_trade(row) -> str:
     trade = infer_trade(row)
-    longs = get_sector_longs(row)
-    shorts = get_sector_shorts(row)
+    longs = get_equities_long(row)
+    shorts = get_equities_short(row)
 
     if trade == "Long" and longs:
         return f"Long {', '.join(longs[:5])}"
@@ -238,24 +231,23 @@ def get_why_it_matters(row) -> str:
     commodity = normalize_text(row.get("commodity"), "")
     sectors = get_sectors(row)
     trade = infer_trade(row)
-
     sector_text = ", ".join(sectors[:3]) if sectors else "related sectors"
 
     if trade == "Long":
         return f"{anomaly.title()} can tighten supply or raise disruption risk for {commodity}, while also helping {sector_text}."
     if trade == "Short":
-        return f"{anomaly.title()} can create losses or pressure margins in {commodity} and hurt exposed names such as insurers or affected sectors."
+        return f"{anomaly.title()} can create losses or pressure margins in {commodity} and hurt exposed names such as insurers or other affected sectors."
     return f"{anomaly.title()} matters for {commodity} and nearby sectors, but the setup is not strong enough yet for a clear trade."
+
 
 def get_assets_summary(row) -> str:
     parts = []
-
     vehicle = get_vehicle(row)
     if vehicle != "-":
         parts.append(vehicle)
 
-    longs = get_sector_longs(row)
-    shorts = get_sector_shorts(row)
+    longs = get_equities_long(row)
+    shorts = get_equities_short(row)
     sectors = get_sectors(row)
 
     if longs:
@@ -266,6 +258,49 @@ def get_assets_summary(row) -> str:
         parts.append("Sectors: " + ", ".join(sectors[:4]))
 
     return " | ".join(parts) if parts else "-"
+
+
+def build_trigger_evidence(row) -> list[str]:
+    details = parse_jsonish(row.get("details"))
+    evidence = []
+
+    anomaly = normalize_anomaly_key(row.get("anomaly_type"))
+    temp_max = safe_float(details.get("temp_c_max"))
+    temp_mean = safe_float(details.get("temp_c_mean"))
+    temp_min = safe_float(details.get("temp_c_min"))
+    precip = safe_float(details.get("precip_mm_7d"))
+    wind = safe_float(details.get("wind_ms_max"))
+
+    if anomaly == "heatwave":
+        if temp_max is not None:
+            evidence.append(f"Max temp: {temp_max:.1f}°C (heat trigger > 35°C)")
+        if temp_mean is not None:
+            evidence.append(f"Mean temp: {temp_mean:.1f}°C")
+
+    if anomaly == "drought":
+        if precip is not None:
+            evidence.append(f"Rainfall: {precip:.1f} mm (drought trigger ≤ 10 mm)")
+        if temp_mean is not None:
+            evidence.append(f"Mean temp: {temp_mean:.1f}°C (heat stress condition ≥ 28°C)")
+
+    if anomaly == "cold_wave":
+        if temp_min is not None:
+            evidence.append(f"Min temp: {temp_min:.1f}°C")
+
+    if anomaly == "flood":
+        if precip is not None:
+            evidence.append(f"Rainfall: {precip:.1f} mm")
+
+    if anomaly == "storm_wind":
+        if wind is not None:
+            evidence.append(f"Wind: {wind:.1f} m/s (storm trigger ≥ 18 m/s)")
+
+    evidence.append(f"Signal level: {safe_int(row.get('signal_level'))}")
+    evidence.append(f"Persistence: {safe_int(row.get('persistence_score'))}")
+    evidence.append(f"Severity: {safe_int(row.get('severity_score'))}")
+    evidence.append(f"Market score: {safe_int(row.get('market_score'))}")
+
+    return evidence
 
 
 def show_trade_card(row, rank_number=None):
@@ -282,41 +317,36 @@ def show_trade_card(row, rank_number=None):
     with b2:
         st.markdown(conviction_badge(bucket), unsafe_allow_html=True)
 
-    st.markdown(f"**Commodity Trade:** {get_commodity_recommendation(row)}")
-    st.markdown(f"**Stock Trade:** {get_stock_recommendation(row)}")
+    st.markdown(f"**Commodity Trade:** {get_commodity_trade(row)}")
+    st.markdown(f"**Stock Trade:** {get_stock_trade(row)}")
     st.markdown(f"**Vehicle:** {get_vehicle(row)}")
     st.markdown(f"**Why this matters:** {get_why_it_matters(row)}")
     st.markdown(f"**Assets:** {get_assets_summary(row)}")
     st.markdown(f"**Forecast Window:** {format_dt(row.get('forecast_start'))} → {format_dt(row.get('forecast_end'))}")
 
     with st.expander("Full breakdown"):
+        st.markdown("**Why this signal triggered**")
+        evidence = build_trigger_evidence(row)
+        for item in evidence:
+            st.write(f"- {item}")
+
         st.markdown("**Commodity recommendation**")
-        st.write(get_commodity_recommendation(row))
+        st.write(get_commodity_trade(row))
 
         st.markdown("**Equity recommendation**")
-        st.write(get_stock_recommendation(row))
+        st.write(get_stock_trade(row))
 
         st.markdown("**Long equities**")
-        longs = get_sector_longs(row)
+        longs = get_equities_long(row)
         st.write(", ".join(longs) if longs else "-")
 
         st.markdown("**Short equities**")
-        shorts = get_sector_shorts(row)
+        shorts = get_equities_short(row)
         st.write(", ".join(shorts) if shorts else "-")
 
         st.markdown("**Sectors**")
         sectors = get_sectors(row)
         st.write(", ".join(sectors) if sectors else "-")
-
-        st.markdown("**What changed**")
-        st.write(normalize_text(row.get("what_changed")))
-
-        st.markdown("**Internal scores**")
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Signal", safe_int(row.get("signal_level")))
-        s2.metric("Persistence", safe_int(row.get("persistence_score")))
-        s3.metric("Severity", safe_int(row.get("severity_score")))
-        s4.metric("Market", safe_int(row.get("market_score")))
 
         st.markdown("**Weather details**")
         details = parse_jsonish(row.get("details"))
@@ -328,42 +358,38 @@ def show_trade_card(row, rank_number=None):
     st.divider()
 
 
-try:
-    df = read_sql(
-        """
-        SELECT
-            timestamp,
-            region,
-            commodity,
-            anomaly_type,
-            anomaly_value,
-            persistence_score,
-            severity_score,
-            market_score,
-            signal_level,
-            signal_bucket,
-            trade_bias,
-            recommendation,
-            affected_market,
-            best_vehicle,
-            proxy_equities,
-            secondary_exposures,
-            affected_assets_json,
-            what_changed,
-            why_it_matters,
-            what_to_watch_next,
-            source_file,
-            forecast_start,
-            forecast_end,
-            details,
-            created_at
-        FROM weather_global_shocks
-        ORDER BY created_at DESC, signal_level DESC, region ASC, commodity ASC
-        """
-    )
-except Exception as e:
-    st.error(f"Could not read weather_global_shocks from database: {e}")
-    st.stop()
+df = read_sql(
+    """
+    SELECT
+        timestamp,
+        region,
+        commodity,
+        anomaly_type,
+        anomaly_value,
+        persistence_score,
+        severity_score,
+        market_score,
+        signal_level,
+        signal_bucket,
+        trade_bias,
+        recommendation,
+        affected_market,
+        best_vehicle,
+        proxy_equities,
+        secondary_exposures,
+        affected_assets_json,
+        what_changed,
+        why_it_matters,
+        what_to_watch_next,
+        source_file,
+        forecast_start,
+        forecast_end,
+        details,
+        created_at
+    FROM weather_global_shocks
+    ORDER BY created_at DESC, signal_level DESC, region ASC, commodity ASC
+    """
+)
 
 if df.empty:
     st.warning("No weather shocks found yet.")
@@ -415,11 +441,7 @@ filtered = filtered.sort_values(
     ascending=[False, False, False, False, False],
 ).reset_index(drop=True)
 
-last_update = None
-if "created_at" in filtered.columns and not pd.isna(filtered["created_at"]).all():
-    last_update = filtered["created_at"].max()
-elif "created_at" in df.columns and not pd.isna(df["created_at"]).all():
-    last_update = df["created_at"].max()
+last_update = filtered["created_at"].max() if "created_at" in filtered.columns and not filtered.empty else None
 
 long_df = filtered[filtered["trade_display"] == "Long"]
 short_df = filtered[filtered["trade_display"] == "Short"]
@@ -460,8 +482,8 @@ table_df = filtered[
     ]
 ].copy()
 
-table_df["Commodity Trade"] = filtered.apply(get_commodity_recommendation, axis=1)
-table_df["Stock Trade"] = filtered.apply(get_stock_recommendation, axis=1)
+table_df["Commodity Trade"] = filtered.apply(get_commodity_trade, axis=1)
+table_df["Stock Trade"] = filtered.apply(get_stock_trade, axis=1)
 table_df["Vehicle"] = filtered.apply(get_vehicle, axis=1)
 
 table_df = table_df.rename(
