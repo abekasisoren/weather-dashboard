@@ -1,8 +1,16 @@
-from ecmwf.opendata import Client
+import os
 from datetime import datetime, timedelta, timezone
-import xarray as xr
-import pandas as pd
+
 import numpy as np
+import pandas as pd
+import psycopg
+import xarray as xr
+from ecmwf.opendata import Client
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL environment variable is not set.")
 
 client = Client(source="aws")
 
@@ -21,6 +29,13 @@ def open_param_dataset(grib_file, short_name):
         engine="cfgrib",
         backend_kwargs={"filter_by_keys": {"shortName": short_name}},
     )
+
+
+def maybe_step(ds, var_name):
+    arr = ds[var_name]
+    if "step" in arr.dims:
+        return arr.isel(step=0)
+    return arr
 
 
 def normalize_lon(lon):
@@ -53,79 +68,102 @@ def macro_region(lat, lon):
     return "Other"
 
 
-def market_mapping(shock_type, lat, lon, value):
+def market_mapping(shock_type, lat, lon, magnitude):
     region = macro_region(lat, lon)
 
     if shock_type == "storm":
-        if region in ["Caribbean / Gulf", "North Atlantic", "NW Pacific"]:
-            return (
-                "Storm / Shipping / Insurance",
-                "Offshore energy, shipping, insurance, airlines, cruises",
-                "Equity / Shipping"
-            )
-        if region in ["Europe", "North America"]:
-            return (
-                "Utilities / Insurance / Logistics",
-                "Utilities, insurers, logistics, ports",
-                "Equity / Utility"
-            )
-        return (
-            "Storm / Logistics",
-            "Shipping, insurers, logistics",
-            "Equity / Proxy"
-        )
+        if region in ["Caribbean / Gulf"]:
+            return {
+                "market": "Storm / Offshore Energy / Insurance",
+                "affected_industries": "Offshore energy, LNG terminals, insurers, cruise lines, airlines",
+                "best_vehicle": "Energy / Insurance Basket",
+                "proxy_equities": "SLB, HAL, XOM, CVX, LNG, FLNG, TRV, ALL, HIG",
+                "weather_logic": "Wind and pressure signals suggest storm risk intensification.",
+                "market_logic": "Storms in the Gulf can disrupt offshore production and raise insurance/travel risk."
+            }
+        if region in ["North Atlantic", "NW Pacific"]:
+            return {
+                "market": "Storm / Shipping / Insurance",
+                "affected_industries": "Shipping, marine insurers, airlines, coastal logistics",
+                "best_vehicle": "Shipping / Insurance Basket",
+                "proxy_equities": "STNG, TK, FLNG, ZIM, TRV, ALL, HIG",
+                "weather_logic": "Storm intensity metrics are spiking across key ocean routes.",
+                "market_logic": "Shipping and insurance are sensitive to rising storm disruption."
+            }
+        return {
+            "market": "Storm / Logistics",
+            "affected_industries": "Shipping, insurers, logistics",
+            "best_vehicle": "Logistics / Insurance Basket",
+            "proxy_equities": "STNG, TK, FLNG, TRV, ALL, HIG",
+            "weather_logic": "Storm metrics are rising materially in this region.",
+            "market_logic": "Logistics and insurers become sensitive when storm disruption increases."
+        }
 
     if shock_type == "heat":
-        if region in ["North America", "Europe", "Asia"]:
-            return (
-                "Power Demand / Gas / Utilities",
-                "Utilities, power demand, natural gas, grid stress",
-                "Utility / Power"
-            )
-        return (
-            "Heat / Power",
-            "Power demand, cooling load, utilities",
-            "Utility / Proxy"
-        )
+        return {
+            "market": "Heat / Power Demand / Utilities",
+            "affected_industries": "Utilities, power demand, natural gas, cooling load",
+            "best_vehicle": "Utilities / Power",
+            "proxy_equities": "VST, NRG, XLU, DUK, SO, LNG",
+            "weather_logic": "Temperature forecasts are moving sharply hotter.",
+            "market_logic": "Higher temperatures can lift cooling demand and strain power systems."
+        }
 
     if shock_type == "cold":
-        return (
-            "Gas / Power / Heating",
-            "Natural gas, power generation, heating demand",
-            "Commodity / Futures"
-        )
+        return {
+            "market": "Cold / Gas / Power",
+            "affected_industries": "Natural gas, heating demand, power generation",
+            "best_vehicle": "Natural Gas / Power",
+            "proxy_equities": "UNG, LNG, SHEL, BP",
+            "weather_logic": "Temperature forecasts are turning sharply colder.",
+            "market_logic": "Colder conditions can raise heating demand and energy sensitivity."
+        }
 
     if shock_type == "dry":
-        if region in ["North America", "South America"]:
-            return (
-                "Agriculture / Fertilizer",
-                "Grains, oilseeds, fertilizers, agribusiness",
-                "Commodity / Futures"
-            )
-        if region in ["SE Asia / Australia", "Asia"]:
-            return (
-                "Agriculture / Food Inputs",
-                "Palm oil, grains, food inputs",
-                "Commodity / Futures"
-            )
-        return (
-            "Agriculture",
-            "Crop stress, fertilizers, agribusiness",
-            "Commodity / Futures"
-        )
+        return {
+            "market": "Dryness / Agriculture",
+            "affected_industries": "Grains, oilseeds, fertilizers, agribusiness",
+            "best_vehicle": "Commodity / Agriculture",
+            "proxy_equities": "ADM, BG, NTR, MOS, CF",
+            "weather_logic": "Rainfall forecasts are collapsing and dryness risk is increasing.",
+            "market_logic": "Dryness can tighten crop supply expectations and lift agriculture sensitivity."
+        }
 
     if shock_type == "wet":
-        return (
-            "Flood / Logistics / Crop Disruption",
-            "Logistics, ports, crops, insurers",
-            "Logistics / Proxy"
-        )
+        return {
+            "market": "Flood / Logistics / Crop Disruption",
+            "affected_industries": "Logistics, ports, crops, insurers",
+            "best_vehicle": "Logistics / Insurance",
+            "proxy_equities": "ZIM, STNG, TK, TRV, ALL, HIG",
+            "weather_logic": "Rainfall forecasts are surging and flood risk is building.",
+            "market_logic": "Flooding can disrupt logistics, ports, crops and insurance exposure."
+        }
 
-    return (
-        "General Weather",
-        "Multi-sector weather sensitivity",
-        "Mixed"
-    )
+    return {
+        "market": "General Weather",
+        "affected_industries": "Multi-sector weather sensitivity",
+        "best_vehicle": "Mixed",
+        "proxy_equities": "Mixed",
+        "weather_logic": "Material weather anomaly detected.",
+        "market_logic": "Weather change could influence multiple sectors."
+    }
+
+
+def score_shock(shock_type, magnitude, region):
+    if shock_type == "storm":
+        base = min(10.0, magnitude / 12.0)
+    elif shock_type in ["heat", "cold"]:
+        base = min(10.0, abs(magnitude) / 1.2)
+    else:
+        base = min(10.0, abs(magnitude) / 5.0)
+
+    market_bonus = 0.0
+    if region in ["North America", "South America", "Europe", "North Atlantic", "Caribbean / Gulf"]:
+        market_bonus = 1.0
+    elif region in ["Asia", "SE Asia / Australia", "NW Pacific"]:
+        market_bonus = 0.7
+
+    return round(min(10.0, base + market_bonus), 2)
 
 
 found = []
@@ -166,14 +204,6 @@ prev_u = open_param_dataset(previous_file, "10u")
 prev_v = open_param_dataset(previous_file, "10v")
 prev_m = open_param_dataset(previous_file, "msl")
 
-
-def maybe_step(ds, var_name):
-    arr = ds[var_name]
-    if "step" in arr.dims:
-        return arr.isel(step=0)
-    return arr
-
-
 cur_t2m = maybe_step(cur_t, "t2m") - 273.15
 prev_t2m = maybe_step(prev_t, "t2m") - 273.15
 
@@ -189,8 +219,8 @@ prev_v10 = maybe_step(prev_v, "v10")
 cur_msl = maybe_step(cur_m, "msl") / 100.0
 prev_msl = maybe_step(prev_m, "msl") / 100.0
 
-cur_wind = np.sqrt(cur_u10 ** 2 + cur_v10 ** 2)
-prev_wind = np.sqrt(prev_u10 ** 2 + prev_v10 ** 2)
+cur_wind = np.sqrt(cur_u10**2 + cur_v10**2)
+prev_wind = np.sqrt(prev_u10**2 + prev_v10**2)
 
 temp_delta = (cur_t2m - prev_t2m).values
 precip_delta = (cur_tp - prev_tp).values
@@ -202,127 +232,135 @@ lons = cur_t2m.longitude.values
 
 rows = []
 
-# 1. Heat shocks
-heat_mask = temp_delta >= 4.0
-for i, j in np.argwhere(heat_mask):
-    lat = float(lats[i])
-    lon = float(lons[j])
-    value = float(temp_delta[i, j])
-    market, industries, vehicle = market_mapping("heat", lat, lon, value)
+
+def add_row(shock_type, lat, lon, magnitude):
+    region = macro_region(lat, lon)
+    mapping = market_mapping(shock_type, lat, lon, magnitude)
+    score = score_shock(shock_type, magnitude, region)
+
+    if score < 5:
+        return
+
+    recommendation = "TRADE" if score >= 8 else "WATCH"
+
     rows.append({
-        "type": "heat",
+        "shock_type": shock_type,
+        "macro_region": region,
         "lat": round(lat, 2),
         "lon_normal": round(normalize_lon(float(lon)), 2),
-        "value": round(value, 2),
-        "macro_region": macro_region(lat, lon),
-        "Market": market,
-        "AffectedIndustries": industries,
-        "BestVehicle": vehicle,
-        "TradePriority": min(4, max(1, int(np.ceil(value / 2.5))))
+        "magnitude": round(float(magnitude), 2),
+        "score": score,
+        "recommendation": recommendation,
+        "market": mapping["market"],
+        "affected_industries": mapping["affected_industries"],
+        "best_vehicle": mapping["best_vehicle"],
+        "proxy_equities": mapping["proxy_equities"],
+        "weather_logic": mapping["weather_logic"],
+        "market_logic": mapping["market_logic"],
+        "updated_at": datetime.now(timezone.utc),
     })
 
-# 2. Cold shocks
-cold_mask = temp_delta <= -4.0
-for i, j in np.argwhere(cold_mask):
-    lat = float(lats[i])
-    lon = float(lons[j])
-    value = float(temp_delta[i, j])
-    market, industries, vehicle = market_mapping("cold", lat, lon, value)
-    rows.append({
-        "type": "cold",
-        "lat": round(lat, 2),
-        "lon_normal": round(normalize_lon(float(lon)), 2),
-        "value": round(value, 2),
-        "macro_region": macro_region(lat, lon),
-        "Market": market,
-        "AffectedIndustries": industries,
-        "BestVehicle": vehicle,
-        "TradePriority": min(4, max(1, int(np.ceil(abs(value) / 2.5))))
-    })
 
-# 3. Wet shocks
-wet_mask = precip_delta >= 15.0
-for i, j in np.argwhere(wet_mask):
-    lat = float(lats[i])
-    lon = float(lons[j])
-    value = float(precip_delta[i, j])
-    market, industries, vehicle = market_mapping("wet", lat, lon, value)
-    rows.append({
-        "type": "wet",
-        "lat": round(lat, 2),
-        "lon_normal": round(normalize_lon(float(lon)), 2),
-        "value": round(value, 2),
-        "macro_region": macro_region(lat, lon),
-        "Market": market,
-        "AffectedIndustries": industries,
-        "BestVehicle": vehicle,
-        "TradePriority": min(4, max(1, int(np.ceil(value / 10.0))))
-    })
+# Heat shocks
+for i, j in np.argwhere(temp_delta >= 4.0):
+    add_row("heat", float(lats[i]), float(lons[j]), float(temp_delta[i, j]))
 
-# 4. Dry shocks
-dry_mask = precip_delta <= -15.0
-for i, j in np.argwhere(dry_mask):
-    lat = float(lats[i])
-    lon = float(lons[j])
-    value = float(precip_delta[i, j])
-    market, industries, vehicle = market_mapping("dry", lat, lon, value)
-    rows.append({
-        "type": "dry",
-        "lat": round(lat, 2),
-        "lon_normal": round(normalize_lon(float(lon)), 2),
-        "value": round(value, 2),
-        "macro_region": macro_region(lat, lon),
-        "Market": market,
-        "AffectedIndustries": industries,
-        "BestVehicle": vehicle,
-        "TradePriority": min(4, max(1, int(np.ceil(abs(value) / 10.0))))
-    })
+# Cold shocks
+for i, j in np.argwhere(temp_delta <= -4.0):
+    add_row("cold", float(lats[i]), float(lons[j]), float(temp_delta[i, j]))
 
-# 5. Storm shocks
+# Wet shocks
+for i, j in np.argwhere(precip_delta >= 15.0):
+    add_row("wet", float(lats[i]), float(lons[j]), float(precip_delta[i, j]))
+
+# Dry shocks
+for i, j in np.argwhere(precip_delta <= -15.0):
+    add_row("dry", float(lats[i]), float(lons[j]), float(precip_delta[i, j]))
+
+# Storm shocks
 storm_score = np.maximum(wind_delta, 0) * 2.5 + np.maximum(-msl_delta, 0) * 2.0
-storm_mask = storm_score >= 10.0
-for i, j in np.argwhere(storm_mask):
-    lat = float(lats[i])
-    lon = float(lons[j])
-    value = float(storm_score[i, j])
-    market, industries, vehicle = market_mapping("storm", lat, lon, value)
-    rows.append({
-        "type": "storm",
-        "lat": round(lat, 2),
-        "lon_normal": round(normalize_lon(float(lon)), 2),
-        "value": round(value, 2),
-        "macro_region": macro_region(lat, lon),
-        "Market": market,
-        "AffectedIndustries": industries,
-        "BestVehicle": vehicle,
-        "TradePriority": min(4, max(1, int(np.ceil(value / 8.0))))
-    })
+for i, j in np.argwhere(storm_score >= 10.0):
+    add_row("storm", float(lats[i]), float(lons[j]), float(storm_score[i, j]))
 
 df = pd.DataFrame(rows)
 
-if df.empty:
-    df = pd.DataFrame([{
-        "type": "none",
-        "lat": 0,
-        "lon_normal": 0,
-        "value": 0,
-        "macro_region": "None",
-        "Market": "None",
-        "AffectedIndustries": "None",
-        "BestVehicle": "None",
-        "TradePriority": 0
-    }])
-else:
-    df["abs_value"] = df["value"].abs()
+if not df.empty:
+    df["abs_mag"] = df["magnitude"].abs()
     df = (
-        df.sort_values(["TradePriority", "abs_value"], ascending=[False, False])
-          .drop_duplicates(subset=["type", "macro_region"], keep="first")
-          .drop(columns=["abs_value"])
-          .head(25)
-          .reset_index(drop=True)
+        df.sort_values(["score", "abs_mag"], ascending=[False, False])
+        .drop_duplicates(subset=["shock_type", "macro_region"], keep="first")
+        .drop(columns=["abs_mag"])
+        .head(10)
+        .reset_index(drop=True)
     )
 
-df.to_csv("global_shocks.csv", index=False)
+with psycopg.connect(DATABASE_URL) as conn:
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS weather_global_shocks (
+                id BIGSERIAL PRIMARY KEY,
+                shock_type TEXT NOT NULL,
+                macro_region TEXT NOT NULL,
+                lat DOUBLE PRECISION NOT NULL,
+                lon_normal DOUBLE PRECISION NOT NULL,
+                magnitude DOUBLE PRECISION NOT NULL,
+                score DOUBLE PRECISION NOT NULL,
+                recommendation TEXT NOT NULL,
+                market TEXT NOT NULL,
+                affected_industries TEXT NOT NULL,
+                best_vehicle TEXT NOT NULL,
+                proxy_equities TEXT NOT NULL,
+                weather_logic TEXT NOT NULL,
+                market_logic TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )
+        """)
 
-print("global_shocks.csv generated")
-print(df.head(15).to_string(index=False))
+        cur.execute("TRUNCATE TABLE weather_global_shocks")
+
+        if not df.empty:
+            cur.executemany("""
+                INSERT INTO weather_global_shocks (
+                    shock_type,
+                    macro_region,
+                    lat,
+                    lon_normal,
+                    magnitude,
+                    score,
+                    recommendation,
+                    market,
+                    affected_industries,
+                    best_vehicle,
+                    proxy_equities,
+                    weather_logic,
+                    market_logic,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, [
+                (
+                    r["shock_type"],
+                    r["macro_region"],
+                    float(r["lat"]),
+                    float(r["lon_normal"]),
+                    float(r["magnitude"]),
+                    float(r["score"]),
+                    r["recommendation"],
+                    r["market"],
+                    r["affected_industries"],
+                    r["best_vehicle"],
+                    r["proxy_equities"],
+                    r["weather_logic"],
+                    r["market_logic"],
+                    r["updated_at"],
+                )
+                for _, r in df.iterrows()
+            ])
+
+        conn.commit()
+
+print("weather_global_shocks table updated in Postgres")
+if df.empty:
+    print("No global shocks above threshold")
+else:
+    print(df[["shock_type", "macro_region", "score", "recommendation"]].to_string(index=False))
