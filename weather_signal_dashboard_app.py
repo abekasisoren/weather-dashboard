@@ -1,4 +1,6 @@
+import json
 import os
+from datetime import datetime
 
 import pandas as pd
 import psycopg
@@ -9,7 +11,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 st.set_page_config(page_title="Global Weather Signal Dashboard", layout="wide")
 
 st.title("Global Weather Signal Dashboard")
-st.caption("Early weather intelligence for markets: what changed, why it matters, and what to do.")
+st.caption("Early weather intelligence for markets based on real ECMWF forecast signals.")
 
 if not DATABASE_URL:
     st.error("DATABASE_URL environment variable is not set.")
@@ -25,176 +27,244 @@ def read_sql(query: str) -> pd.DataFrame:
         return pd.DataFrame(rows, columns=cols)
 
 
-try:
-    signals = read_sql("""
-        SELECT
-            region,
-            weather_event,
-            signal_level,
-            recommendation,
-            current_value,
-            prior_avg_value,
-            delta_value,
-            what_changed,
-            why_it_matters,
-            affected_market,
-            best_vehicle,
-            proxy_equities,
-            what_to_watch_next,
-            updated_at
-        FROM weather_signals
-        ORDER BY
-            CASE signal_level
-                WHEN 'HIGH CONVICTION' THEN 1
-                WHEN 'ACTIONABLE' THEN 2
-                WHEN 'EARLY SIGNAL' THEN 3
-                ELSE 4
-            END,
-            region ASC
-    """)
-except Exception as e:
-    st.error(f"Could not read weather_signals from database: {e}")
-    st.stop()
-
-try:
-    global_shocks = read_sql("""
-        SELECT
-            macro_region,
-            shock_type,
-            signal_level,
-            recommendation,
-            magnitude,
-            what_changed,
-            why_it_matters,
-            affected_market,
-            best_vehicle,
-            proxy_equities,
-            updated_at
-        FROM weather_global_shocks
-        ORDER BY
-            CASE signal_level
-                WHEN 'HIGH CONVICTION' THEN 1
-                WHEN 'ACTIONABLE' THEN 2
-                WHEN 'EARLY SIGNAL' THEN 3
-                ELSE 4
-            END,
-            macro_region ASC
-    """)
-except Exception:
-    global_shocks = pd.DataFrame()
-
-last_updates = []
-if not signals.empty and "updated_at" in signals.columns:
-    last_updates.append(str(signals["updated_at"].max()))
-if not global_shocks.empty and "updated_at" in global_shocks.columns:
-    last_updates.append(str(global_shocks["updated_at"].max()))
-
-if last_updates:
-    st.write("Last update:", max(last_updates))
+def score_bucket(score: int) -> str:
+    if score >= 8:
+        return "HIGH CONVICTION"
+    if score >= 5:
+        return "ACTIONABLE"
+    return "EARLY SIGNAL"
 
 
-def show_signal_block(title, row):
-    st.markdown(f"### {title}")
+def format_dt(value) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M UTC")
+    try:
+        return pd.to_datetime(value).strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return str(value)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Signal Level", row["signal_level"])
-    c2.metric("Action", row["recommendation"])
-    c3.metric("Best Vehicle", row["best_vehicle"])
+
+def parse_details(value):
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return {}
+    return {}
+
+
+def make_recommendation(row) -> str:
+    bias = str(row.get("trade_bias", "watch")).lower()
+    commodity = row.get("commodity", "Unknown")
+    anomaly = row.get("anomaly_type", "weather signal")
+    score = int(row.get("signal_level", 0))
+
+    if bias == "bullish":
+        if score >= 8:
+            return f"Strong bullish watch on {commodity}"
+        if score >= 5:
+            return f"Moderate bullish watch on {commodity}"
+        return f"Early bullish signal for {commodity}"
+
+    if bias == "bearish":
+        if score >= 8:
+            return f"Strong bearish watch on {commodity}"
+        if score >= 5:
+            return f"Moderate bearish watch on {commodity}"
+        return f"Early bearish signal for {commodity}"
+
+    return f"Monitor {commodity} for {anomaly}"
+
+
+def make_what_changed(row, details) -> str:
+    anomaly = row.get("anomaly_type", "")
+    value = row.get("anomaly_value")
+    region = row.get("region", "")
+    commodity = row.get("commodity", "")
+
+    if anomaly in ("heatwave", "extreme_heat"):
+        return f"{region} is showing {anomaly.replace('_', ' ')} conditions affecting {commodity}. Peak forecast temperature is {value:.1f}°C."
+    if anomaly == "frost":
+        return f"{region} is showing frost risk affecting {commodity}. Minimum forecast temperature is {value:.1f}°C."
+    if anomaly == "heavy_rain":
+        return f"{region} is showing heavy rain risk affecting {commodity}. Forecast precipitation is {value:.1f} mm over the scan window."
+    if anomaly == "drought":
+        mean_temp = details.get('temp_c_mean')
+        if mean_temp is not None:
+            return f"{region} is showing drought risk affecting {commodity}. Rainfall is only {value:.1f} mm with mean temperature around {mean_temp:.1f}°C."
+        return f"{region} is showing drought risk affecting {commodity}. Rainfall is only {value:.1f} mm."
+    if anomaly == "storm_wind":
+        return f"{region} is showing storm-wind risk affecting {commodity}. Peak wind is {value:.1f} m/s."
+    return f"{region} is showing a weather signal affecting {commodity}. Measured value: {value}."
+
+
+def make_why_it_matters(row) -> str:
+    commodity = row.get("commodity", "")
+    anomaly = row.get("anomaly_type", "")
+    bias = row.get("trade_bias", "watch")
+
+    if bias == "bullish":
+        return f"{anomaly.replace('_', ' ').title()} can tighten supply or raise demand sensitivity for {commodity}, which may support prices and related exposures."
+    if bias == "bearish":
+        return f"{anomaly.replace('_', ' ').title()} can improve supply conditions or weaken pricing support for {commodity}, which may pressure prices and related exposures."
+    return f"This signal may affect pricing expectations and positioning in {commodity}, but the direction is not yet strong enough for conviction."
+
+
+def make_best_vehicle(row) -> str:
+    commodity = row.get("commodity", "")
+    mapping = {
+        "Corn": "Corn futures / CORN ETF",
+        "Soybeans": "Soybean futures / SOYB ETF",
+        "Wheat": "Wheat futures / WEAT ETF",
+        "Coffee": "Coffee futures / JO ETF",
+        "Sugar": "Sugar futures / CANE ETF",
+        "Natural Gas": "Natural gas futures / UNG ETF",
+        "Coal": "Coal producers / coal-linked equities",
+        "Rice": "Rice futures / regional agriculture proxies",
+        "Power Utilities": "European utilities / power-sensitive names",
+    }
+    return mapping.get(commodity, commodity)
+
+
+def make_proxy_equities(row) -> str:
+    commodity = row.get("commodity", "")
+
+    mapping = {
+        "Corn": "ADM, BG, CF, MOS, CTVA, DE, UNP",
+        "Soybeans": "ADM, BG, CF, MOS, CTVA, DE",
+        "Wheat": "ADM, BG, MOS, CF, DE",
+        "Coffee": "SBUX, NSRGY, JDE-related exposure, coffee futures proxies",
+        "Sugar": "CZZ, TRRJF, sugar futures proxies",
+        "Natural Gas": "UNG, EQT, CTRA, RRC, LNG exporters, utilities",
+        "Power Utilities": "European utilities, power generators, gas-sensitive industrials",
+        "Coal": "BTU, ARCH, AMR, coal transport exposure",
+        "Rice": "Rice-linked agri merchants and regional staples exposure",
+    }
+    return mapping.get(commodity, commodity)
+
+
+def show_signal_block(row):
+    details = parse_details(row.get("details"))
+
+    bucket = score_bucket(int(row["signal_level"]))
+    recommendation = make_recommendation(row)
+    what_changed = make_what_changed(row, details)
+    why_it_matters = make_why_it_matters(row)
+    best_vehicle = make_best_vehicle(row)
+    proxy_equities = make_proxy_equities(row)
+
+    st.markdown(f"### {row['region']} — {row['anomaly_type'].replace('_', ' ').title()} — {row['commodity']}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Signal Level", int(row["signal_level"]))
+    c2.metric("Bucket", bucket)
+    c3.metric("Trade Bias", str(row["trade_bias"]).title())
+    c4.metric("Recommendation", recommendation)
+
+    c5, c6, c7 = st.columns(3)
+    c5.metric("Severity", int(row["severity_score"]))
+    c6.metric("Persistence", int(row["persistence_score"]))
+    c7.metric("Market Score", int(row["market_score"]))
+
+    st.markdown(f"**Forecast Window:** {format_dt(row['forecast_start'])} → {format_dt(row['forecast_end'])}")
+    st.markdown(f"**Best Vehicle:** {best_vehicle}")
+    st.markdown(f"**Proxy Equities:** {proxy_equities}")
 
     with st.expander("Full explanation"):
         st.markdown("**What changed**")
-        st.write(row["what_changed"])
+        st.write(what_changed)
 
         st.markdown("**Why it matters**")
-        st.write(row["why_it_matters"])
+        st.write(why_it_matters)
 
-        st.markdown("**Affected market**")
-        st.write(row["affected_market"])
-
-        st.markdown("**Proxy equities**")
-        st.write(row["proxy_equities"])
-
-        if "what_to_watch_next" in row.index:
-            st.markdown("**What to watch next**")
-            st.write(row["what_to_watch_next"])
+        st.markdown("**Weather details**")
+        if details:
+            pretty_details = {
+                "temp_c_max": details.get("temp_c_max"),
+                "temp_c_mean": details.get("temp_c_mean"),
+                "temp_c_min": details.get("temp_c_min"),
+                "precip_mm_7d": details.get("precip_mm_7d"),
+                "wind_ms_max": details.get("wind_ms_max"),
+            }
+            st.json(pretty_details)
+        else:
+            st.write("No additional detail available.")
 
     st.divider()
 
 
-high_conviction_signals = signals[signals["signal_level"] == "HIGH CONVICTION"].copy() if not signals.empty else pd.DataFrame()
-actionable_signals = signals[signals["signal_level"] == "ACTIONABLE"].copy() if not signals.empty else pd.DataFrame()
-early_signals = signals[signals["signal_level"] == "EARLY SIGNAL"].copy() if not signals.empty else pd.DataFrame()
+try:
+    global_shocks = read_sql(
+        """
+        SELECT
+            timestamp,
+            region,
+            commodity,
+            anomaly_type,
+            anomaly_value,
+            persistence_score,
+            severity_score,
+            market_score,
+            signal_level,
+            trade_bias,
+            source_file,
+            forecast_start,
+            forecast_end,
+            details,
+            created_at
+        FROM weather_global_shocks
+        ORDER BY signal_level DESC, region ASC, commodity ASC, anomaly_type ASC
+        """
+    )
+except Exception as e:
+    st.error(f"Could not read weather_global_shocks from database: {e}")
+    st.stop()
 
-high_conviction_shocks = global_shocks[global_shocks["signal_level"] == "HIGH CONVICTION"].copy() if not global_shocks.empty else pd.DataFrame()
-actionable_shocks = global_shocks[global_shocks["signal_level"] == "ACTIONABLE"].copy() if not global_shocks.empty else pd.DataFrame()
-early_shocks = global_shocks[global_shocks["signal_level"] == "EARLY SIGNAL"].copy() if not global_shocks.empty else pd.DataFrame()
+if global_shocks.empty:
+    st.warning("No weather shocks found yet.")
+    st.stop()
+
+if "created_at" in global_shocks.columns and not global_shocks["created_at"].isna().all():
+    st.write("Last update:", format_dt(global_shocks["created_at"].max()))
+
+high_conviction = global_shocks[global_shocks["signal_level"] >= 8].copy()
+actionable = global_shocks[(global_shocks["signal_level"] >= 5) & (global_shocks["signal_level"] < 8)].copy()
+early = global_shocks[global_shocks["signal_level"] < 5].copy()
 
 st.header("🔥 High Conviction")
-
-if high_conviction_signals.empty and high_conviction_shocks.empty:
+if high_conviction.empty:
     st.write("No high-conviction weather trades right now.")
 else:
-    if not high_conviction_signals.empty:
-        st.subheader("Industry / Stock Signals")
-        for _, row in high_conviction_signals.iterrows():
-            show_signal_block(f"{row['region']} — {row['weather_event']}", row)
-
-    if not high_conviction_shocks.empty:
-        st.subheader("Global Weather Radar")
-        for _, row in high_conviction_shocks.iterrows():
-            show_signal_block(f"{row['macro_region']} — {row['shock_type']}", row)
+    for _, row in high_conviction.iterrows():
+        show_signal_block(row)
 
 st.header("⚠️ Actionable")
-
-if actionable_signals.empty and actionable_shocks.empty:
+if actionable.empty:
     st.write("No actionable setups right now.")
 else:
-    if not actionable_signals.empty:
-        for _, row in actionable_signals.iterrows():
-            show_signal_block(f"{row['region']} — {row['weather_event']}", row)
-
-    if not actionable_shocks.empty:
-        for _, row in actionable_shocks.iterrows():
-            show_signal_block(f"{row['macro_region']} — {row['shock_type']}", row)
+    for _, row in actionable.iterrows():
+        show_signal_block(row)
 
 st.header("👀 Early Signals")
-
-if early_signals.empty and early_shocks.empty:
+if early.empty:
     st.write("No early signals right now.")
 else:
-    if not early_signals.empty:
-        for _, row in early_signals.iterrows():
-            with st.expander(f"{row['region']} — {row['weather_event']}"):
-                st.markdown("**What changed**")
-                st.write(row["what_changed"])
-                st.markdown("**Why it matters**")
-                st.write(row["why_it_matters"])
-                st.markdown("**Affected market**")
-                st.write(row["affected_market"])
-                st.markdown("**Best vehicle**")
-                st.write(row["best_vehicle"])
-                st.markdown("**Proxy equities**")
-                st.write(row["proxy_equities"])
-                st.markdown("**What to watch next**")
-                st.write(row["what_to_watch_next"])
+    for _, row in early.iterrows():
+        with st.expander(f"{row['region']} — {row['anomaly_type'].replace('_', ' ').title()} — {row['commodity']}"):
+            details = parse_details(row.get("details"))
+            st.write(make_what_changed(row, details))
+            st.write(make_why_it_matters(row))
+            st.markdown(f"**Trade Bias:** {str(row['trade_bias']).title()}")
+            st.markdown(f"**Best Vehicle:** {make_best_vehicle(row)}")
+            st.markdown(f"**Proxy Equities:** {make_proxy_equities(row)}")
 
-    if not early_shocks.empty:
-        for _, row in early_shocks.iterrows():
-            with st.expander(f"{row['macro_region']} — {row['shock_type']}"):
-                st.markdown("**What changed**")
-                st.write(row["what_changed"])
-                st.markdown("**Why it matters**")
-                st.write(row["why_it_matters"])
-                st.markdown("**Affected market**")
-                st.write(row["affected_market"])
-                st.markdown("**Best vehicle**")
-                st.write(row["best_vehicle"])
-                st.markdown("**Proxy equities**")
-                st.write(row["proxy_equities"])
-
-with st.expander("Raw weather_signals table"):
-    st.dataframe(signals, use_container_width=True)
-
-if not global_shocks.empty:
-    with st.expander("Raw weather_global_shocks table"):
-        st.dataframe(global_shocks, use_container_width=True)
+with st.expander("Raw weather_global_shocks table"):
+    st.dataframe(global_shocks, use_container_width=True)
