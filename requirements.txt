@@ -1,7 +1,0 @@
-streamlit
-pandas
-numpy
-plotly
-xarray
-cfgrib
-ecmwf-opendata

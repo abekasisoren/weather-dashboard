@@ -1,52 +1,77 @@
-import streamlit as st
-import pandas as pd
+import os
 
-st.set_page_config(layout="wide")
+import pandas as pd
+import psycopg
+import streamlit as st
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+st.set_page_config(page_title="Global Weather Signal Dashboard", layout="wide")
 
 st.title("Global Weather Signal Dashboard")
+st.caption("Simple view: what changed, how important it is, what to do")
 
-st.write("Simple view: what changed, how important it is, what to do")
-
-try:
-    signals = pd.read_csv("signals.csv")
-except:
-    st.error("signals.csv not found")
+if not DATABASE_URL:
+    st.error("DATABASE_URL environment variable is not set.")
     st.stop()
 
-# If score column exists, filter high signals
-if "Score" in signals.columns:
-    top_signals = signals[signals["Score"] >= 4]
-else:
-    top_signals = signals
+query = """
+    SELECT
+        region,
+        weather_event,
+        score,
+        recommendation,
+        weather_logic,
+        market_logic,
+        best_vehicle,
+        proxy_equities,
+        updated_at
+    FROM weather_signals
+    ORDER BY score DESC, region ASC
+"""
+
+try:
+    with psycopg.connect(DATABASE_URL) as conn:
+        signals = pd.read_sql(query, conn)
+except Exception as e:
+    st.error(f"Could not read signals from database: {e}")
+    st.stop()
+
+if signals.empty:
+    st.warning("No signals found in database yet. Let the cron job run once, or trigger it manually.")
+    st.stop()
+
+signals["score"] = pd.to_numeric(signals["score"], errors="coerce")
+
+top_signals = signals[signals["score"] >= 4].copy()
+
+last_update = signals["updated_at"].max()
+st.write("Last signal update:", str(last_update))
 
 st.header("Top Weather Signals")
 
-if len(top_signals) == 0:
+if top_signals.empty:
     st.write("No significant signals detected.")
 else:
     for _, row in top_signals.iterrows():
+        st.markdown(f"### {row['region']} — {row['weather_event']}")
 
-        score = row.get("Score","N/A")
-        region = row.get("Region","Unknown")
-        event = row.get("WeatherEvent","")
-        rec = row.get("Recommendation","")
-        weather_logic = row.get("WeatherLogic","")
-        market_logic = row.get("MarketLogic","")
-        vehicle = row.get("BestVehicle","")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Score", f"{row['score']:.2f}")
+        c2.metric("Action", row["recommendation"])
+        c3.metric("Best Vehicle", row["best_vehicle"])
 
-        st.markdown(f"### {region} — {event}")
-        st.markdown(f"**Score:** {score}")
-        st.markdown(f"**Action:** {rec}")
+        with st.expander("Full explanation"):
+            st.markdown("**Weather Logic**")
+            st.write(row["weather_logic"])
 
-        st.markdown("**Weather Logic**")
-        st.write(weather_logic)
+            st.markdown("**Market Logic**")
+            st.write(row["market_logic"])
 
-        st.markdown("**Market Logic**")
-        st.write(market_logic)
-
-        st.markdown(f"**Best Trade Vehicle:** {vehicle}")
+            st.markdown("**Proxy Equities**")
+            st.write(row["proxy_equities"])
 
         st.divider()
 
 st.header("Raw Signal Table")
-st.dataframe(signals)
+st.dataframe(top_signals, use_container_width=True)
