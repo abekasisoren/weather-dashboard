@@ -12,6 +12,7 @@ st.title("Global Weather Signal Dashboard")
 st.caption("Simple view: what changed, how important it is, what to do")
 
 signals_file = Path("signals.csv")
+signals = signals[signals["Score"] >= 6]
 history_file = Path("weather_history.csv")
 market_map_file = Path("weather_market_map.csv")
 base_dir = Path(__file__).resolve().parent
