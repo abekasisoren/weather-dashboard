@@ -9,6 +9,8 @@ import pandas as pd
 import psycopg
 import xarray as xr
 
+from weather_radar_rules import RADAR_EVENT_RULES
+
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 GRIB_GLOB = os.environ.get("GRIB_GLOB", "/opt/render/project/src/**/*.grib2")
@@ -32,7 +34,7 @@ REGIONS = [
         "commodities": ["Wheat"],
     },
     {
-        "name": "Brazil Center-South",
+        "name": "Brazil",
         "lat_min": -25.0,
         "lat_max": -10.0,
         "lon_min": -60.0,
@@ -79,6 +81,30 @@ REGIONS = [
         "lon_max": 154.0,
         "commodities": ["Coal", "Wheat"],
     },
+    {
+        "name": "US Gulf",
+        "lat_min": 24.0,
+        "lat_max": 31.5,
+        "lon_min": -98.0,
+        "lon_max": -80.0,
+        "commodities": ["Oil", "Natural Gas"],
+    },
+    {
+        "name": "Southeast US",
+        "lat_min": 25.0,
+        "lat_max": 36.5,
+        "lon_min": -91.0,
+        "lon_max": -75.0,
+        "commodities": ["Power Utilities"],
+    },
+    {
+        "name": "California",
+        "lat_min": 32.0,
+        "lat_max": 42.0,
+        "lon_min": -125.0,
+        "lon_max": -114.0,
+        "commodities": ["Power Utilities"],
+    },
 ]
 
 MARKET_SENSITIVITY = {
@@ -91,6 +117,7 @@ MARKET_SENSITIVITY = {
     "Power Utilities": 4,
     "Rice": 3,
     "Coal": 3,
+    "Oil": 5,
 }
 
 RULES = {
@@ -110,7 +137,7 @@ RULES = {
         "temp_c_min": 0.0,
         "severity_step_c": 2.0,
         "base_score": 4,
-        "bullish_for": {"Coffee", "Sugar", "Wheat"},
+        "bullish_for": {"Coffee", "Sugar", "Wheat", "Natural Gas", "Power Utilities"},
     },
     "heavy_rain": {
         "precip_mm_7d": 100.0,
@@ -130,7 +157,35 @@ RULES = {
         "wind_ms_max": 18.0,
         "severity_step_ms": 3.0,
         "base_score": 3,
-        "bullish_for": {"Natural Gas", "Power Utilities", "Coal"},
+        "bullish_for": {"Natural Gas", "Power Utilities", "Coal", "Oil"},
+    },
+    "flood_risk": {
+        "precip_mm_7d": 140.0,
+        "severity_step_mm": 30.0,
+        "base_score": 4,
+        "bullish_for": {"Power Utilities", "Oil", "Natural Gas"},
+        "bearish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar"},
+    },
+    "wildfire_risk": {
+        "temp_c_max": 36.0,
+        "precip_mm_7d_max": 5.0,
+        "wind_ms_min": 10.0,
+        "severity_step_c": 2.0,
+        "base_score": 4,
+        "bullish_for": {"Power Utilities"},
+    },
+    "cold_wave": {
+        "temp_c_min": -5.0,
+        "severity_step_c": 3.0,
+        "base_score": 4,
+        "bullish_for": {"Natural Gas", "Power Utilities", "Wheat"},
+    },
+    "hurricane_risk": {
+        "wind_ms_max": 25.0,
+        "precip_mm_7d": 120.0,
+        "severity_step_ms": 5.0,
+        "base_score": 5,
+        "bullish_for": {"Oil", "Natural Gas", "Power Utilities"},
     },
 }
 
@@ -138,50 +193,54 @@ ASSET_MAP = {
     "Corn": {
         "best_vehicle": "Corn futures / CORN ETF",
         "proxy_equities": ["ADM", "BG", "CF", "MOS", "CTVA", "DE", "UNP"],
-        "secondary_exposures": ["ethanol producers", "grain handlers", "rail logistics", "crop insurers", "farm equipment"],
+        "secondary_exposures": ["ethanol", "grain handlers", "rail logistics", "crop insurers", "farm equipment"],
     },
     "Soybeans": {
         "best_vehicle": "Soybean futures / SOYB ETF",
         "proxy_equities": ["ADM", "BG", "CF", "MOS", "CTVA", "DE"],
-        "secondary_exposures": ["soy processors", "export terminals", "fertilizer names", "farm equipment"],
+        "secondary_exposures": ["soy processors", "export terminals", "fertilizer", "farm equipment"],
     },
     "Wheat": {
         "best_vehicle": "Wheat futures / WEAT ETF",
         "proxy_equities": ["ADM", "BG", "MOS", "CF", "DE"],
-        "secondary_exposures": ["grain traders", "fertilizer names", "farm equipment", "food inflation proxies"],
+        "secondary_exposures": ["grain traders", "fertilizer", "farm equipment", "food inflation"],
     },
     "Coffee": {
         "best_vehicle": "Coffee futures / JO ETF",
         "proxy_equities": ["SBUX", "NSRGY"],
-        "secondary_exposures": ["coffee roasters", "packaged beverage names", "soft commodities traders"],
+        "secondary_exposures": ["coffee roasters", "packaged beverages", "soft commodities"],
     },
     "Sugar": {
         "best_vehicle": "Sugar futures / CANE ETF",
         "proxy_equities": ["CZZ", "TRRJF"],
-        "secondary_exposures": ["ethanol-linked producers", "food input cost proxies", "soft commodities traders"],
+        "secondary_exposures": ["ethanol-linked producers", "food input costs", "soft commodities"],
     },
     "Natural Gas": {
         "best_vehicle": "Natural gas futures / UNG ETF",
         "proxy_equities": ["EQT", "CTRA", "RRC", "LNG"],
-        "secondary_exposures": ["LNG exporters", "gas-sensitive utilities", "power generators", "industrial demand proxies"],
+        "secondary_exposures": ["LNG exporters", "utilities", "power generation", "industrial demand"],
     },
     "Power Utilities": {
-        "best_vehicle": "European utilities / power-sensitive names",
+        "best_vehicle": "European utilities basket",
         "proxy_equities": ["NGG", "IBE.MC", "EOAN.DE", "ENGIY"],
         "secondary_exposures": ["power generators", "grid operators", "gas-sensitive industrials"],
     },
     "Rice": {
-        "best_vehicle": "Rice futures / regional agri proxies",
+        "best_vehicle": "Rice futures / agri proxies",
         "proxy_equities": ["ADM", "BG"],
         "secondary_exposures": ["food staples", "Asian agri merchants", "supply-chain logistics"],
     },
     "Coal": {
-        "best_vehicle": "Coal producers / coal-linked equities",
+        "best_vehicle": "Coal producers basket",
         "proxy_equities": ["BTU", "ARCH", "AMR"],
         "secondary_exposures": ["bulk shipping", "power generation", "rail freight"],
     },
+    "Oil": {
+        "best_vehicle": "Crude oil futures / USO ETF",
+        "proxy_equities": ["XOM", "CVX", "COP"],
+        "secondary_exposures": ["refiners", "offshore services", "tankers"],
+    },
 }
-
 
 def log(msg: str) -> None:
     print(f"[{datetime.now(UTC).isoformat()}] {msg}", flush=True)
@@ -221,44 +280,6 @@ def ensure_schema(conn) -> None:
             );
             """
         )
-
-        alter_statements = [
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS timestamp TIMESTAMP;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS region TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS commodity TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS anomaly_type TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS anomaly_value DOUBLE PRECISION;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS persistence_score INTEGER;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS severity_score INTEGER;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS market_score INTEGER;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS signal_level INTEGER;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS signal_bucket TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS trade_bias TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS recommendation TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS affected_market TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS best_vehicle TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS proxy_equities TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS secondary_exposures TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS affected_assets_json JSONB;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS what_changed TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS why_it_matters TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS what_to_watch_next TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS source_file TEXT;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS forecast_start TIMESTAMP;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS forecast_end TIMESTAMP;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS details JSONB;",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();",
-        ]
-
-        for ddl in alter_statements:
-            cur.execute(ddl)
-
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_weather_global_shocks_lookup
-            ON weather_global_shocks (region, commodity, anomaly_type, timestamp);
-            """
-        )
         conn.commit()
 
 
@@ -285,16 +306,12 @@ def get_var_name(ds: xr.Dataset, options: list[str]) -> str | None:
 
 def open_grib_dataset(path: str) -> xr.Dataset:
     backend_kwargs = {"indexpath": ""}
-    ds = xr.open_dataset(path, engine="cfgrib", backend_kwargs=backend_kwargs)
-    return ds
+    return xr.open_dataset(path, engine="cfgrib", backend_kwargs=backend_kwargs)
 
 
 def open_grib_dataset_filtered(path: str, filter_by_keys: dict) -> xr.Dataset | None:
     try:
-        backend_kwargs = {
-            "indexpath": "",
-            "filter_by_keys": filter_by_keys,
-        }
+        backend_kwargs = {"indexpath": "", "filter_by_keys": filter_by_keys}
         return xr.open_dataset(path, engine="cfgrib", backend_kwargs=backend_kwargs)
     except Exception:
         return None
@@ -304,7 +321,6 @@ def normalize_longitudes(ds: xr.Dataset) -> xr.Dataset:
     lon_name = get_coord_name(ds, ["longitude", "lon", "long"])
     if lon_name is None:
         return ds
-
     lon_vals = ds[lon_name].values
     if np.nanmax(lon_vals) > 180:
         new_lon = ((lon_vals + 180) % 360) - 180
@@ -351,17 +367,6 @@ def trim_forecast_horizon(da: xr.DataArray) -> xr.DataArray:
     return da
 
 
-def safe_datetime_for_json(value):
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.isoformat()
-    try:
-        return pd.to_datetime(value).isoformat()
-    except Exception:
-        return str(value)
-
-
 def sanitize_details(details: dict) -> dict:
     clean = {}
     for k, v in details.items():
@@ -385,7 +390,6 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
         "forecast_end": None,
     }
 
-    # Temperature from main dataset or filtered fallback
     ds_temp = normalize_longitudes(main_ds)
     t_name = get_var_name(ds_temp, ["t2m", "2t"])
     if t_name is None:
@@ -410,7 +414,6 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
         stats["forecast_start"] = pd.Timestamp(times.min()).to_pydatetime()
         stats["forecast_end"] = pd.Timestamp(times.max()).to_pydatetime()
 
-    # Precipitation
     ds_tp = normalize_longitudes(main_ds)
     tp_name = get_var_name(ds_tp, ["tp", "total_precipitation"])
     if tp_name is None:
@@ -434,7 +437,6 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
             stats["forecast_start"] = pd.Timestamp(times.min()).to_pydatetime()
             stats["forecast_end"] = pd.Timestamp(times.max()).to_pydatetime()
 
-    # Wind: try si10 first, then u10/v10 with height filter
     ds_wind = normalize_longitudes(main_ds)
     wind_name = get_var_name(ds_wind, ["si10", "wind10m", "ws10"])
     u10_name = get_var_name(ds_wind, ["u10", "10u"])
@@ -444,13 +446,13 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
         wind = trim_forecast_horizon(subset_region(ds_wind[wind_name], region))
         stats["wind_ms_max"] = float(wind.max(skipna=True).values)
     else:
+        ds_u = None
+        ds_v = None
         if u10_name is None:
             fallback_u = open_grib_dataset_filtered(source_file, {"shortName": "10u", "typeOfLevel": "heightAboveGround", "level": 10})
             if fallback_u is not None:
                 ds_u = normalize_longitudes(fallback_u)
                 u10_name = get_var_name(ds_u, ["u10", "10u"])
-            else:
-                ds_u = None
         else:
             ds_u = ds_wind
 
@@ -459,8 +461,6 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
             if fallback_v is not None:
                 ds_v = normalize_longitudes(fallback_v)
                 v10_name = get_var_name(ds_v, ["v10", "10v"])
-            else:
-                ds_v = None
         else:
             ds_v = ds_wind
 
@@ -480,7 +480,7 @@ def severity_from_excess(excess: float, step: float, base: int) -> int:
 
 
 def classify_trade_bias(anomaly_type: str, commodity: str) -> str:
-    rule = RULES[anomaly_type]
+    rule = RULES.get(anomaly_type, {})
     if commodity in rule.get("bullish_for", set()):
         return "bullish"
     if commodity in rule.get("bearish_for", set()):
@@ -488,264 +488,26 @@ def classify_trade_bias(anomaly_type: str, commodity: str) -> str:
     return "watch"
 
 
-def build_signals_from_stats(region: dict, stats: dict, source_file: str) -> list[dict]:
-    signals = []
-
-    temp_c_max = stats["temp_c_max"]
-    temp_c_mean = stats["temp_c_mean"]
-    temp_c_min = stats["temp_c_min"]
-    precip_mm_7d = stats["precip_mm_7d"]
-    wind_ms_max = stats["wind_ms_max"]
-
-    for commodity in region["commodities"]:
-        if temp_c_max is not None and temp_c_max >= RULES["heatwave"]["temp_c_max"]:
-            excess = temp_c_max - RULES["heatwave"]["temp_c_max"]
-            severity = severity_from_excess(excess, RULES["heatwave"]["severity_step_c"], RULES["heatwave"]["base_score"])
-            signals.append(
-                make_signal(
-                    region=region["name"],
-                    commodity=commodity,
-                    anomaly_type="heatwave",
-                    anomaly_value=temp_c_max,
-                    severity_score=severity,
-                    market_score=MARKET_SENSITIVITY.get(commodity, 3),
-                    trade_bias=classify_trade_bias("heatwave", commodity),
-                    forecast_start=stats["forecast_start"],
-                    forecast_end=stats["forecast_end"],
-                    source_file=source_file,
-                    details=stats,
-                )
-            )
-
-        if temp_c_max is not None and temp_c_max >= RULES["extreme_heat"]["temp_c_max"]:
-            excess = temp_c_max - RULES["extreme_heat"]["temp_c_max"]
-            severity = severity_from_excess(excess, RULES["extreme_heat"]["severity_step_c"], RULES["extreme_heat"]["base_score"])
-            signals.append(
-                make_signal(
-                    region=region["name"],
-                    commodity=commodity,
-                    anomaly_type="extreme_heat",
-                    anomaly_value=temp_c_max,
-                    severity_score=severity,
-                    market_score=MARKET_SENSITIVITY.get(commodity, 3),
-                    trade_bias=classify_trade_bias("extreme_heat", commodity),
-                    forecast_start=stats["forecast_start"],
-                    forecast_end=stats["forecast_end"],
-                    source_file=source_file,
-                    details=stats,
-                )
-            )
-
-        if temp_c_min is not None and temp_c_min <= RULES["frost"]["temp_c_min"]:
-            excess = RULES["frost"]["temp_c_min"] - temp_c_min
-            severity = severity_from_excess(excess, RULES["frost"]["severity_step_c"], RULES["frost"]["base_score"])
-            signals.append(
-                make_signal(
-                    region=region["name"],
-                    commodity=commodity,
-                    anomaly_type="frost",
-                    anomaly_value=temp_c_min,
-                    severity_score=severity,
-                    market_score=MARKET_SENSITIVITY.get(commodity, 3),
-                    trade_bias=classify_trade_bias("frost", commodity),
-                    forecast_start=stats["forecast_start"],
-                    forecast_end=stats["forecast_end"],
-                    source_file=source_file,
-                    details=stats,
-                )
-            )
-
-        if precip_mm_7d is not None and precip_mm_7d >= RULES["heavy_rain"]["precip_mm_7d"]:
-            excess = precip_mm_7d - RULES["heavy_rain"]["precip_mm_7d"]
-            severity = severity_from_excess(excess, RULES["heavy_rain"]["severity_step_mm"], RULES["heavy_rain"]["base_score"])
-            signals.append(
-                make_signal(
-                    region=region["name"],
-                    commodity=commodity,
-                    anomaly_type="heavy_rain",
-                    anomaly_value=precip_mm_7d,
-                    severity_score=severity,
-                    market_score=MARKET_SENSITIVITY.get(commodity, 3),
-                    trade_bias=classify_trade_bias("heavy_rain", commodity),
-                    forecast_start=stats["forecast_start"],
-                    forecast_end=stats["forecast_end"],
-                    source_file=source_file,
-                    details=stats,
-                )
-            )
-
-        if (
-            precip_mm_7d is not None
-            and temp_c_mean is not None
-            and precip_mm_7d <= RULES["drought"]["precip_mm_7d_max"]
-            and temp_c_mean >= RULES["drought"]["temp_c_mean_min"]
-        ):
-            excess = RULES["drought"]["precip_mm_7d_max"] - precip_mm_7d
-            severity = severity_from_excess(excess, RULES["drought"]["severity_step_mm"], RULES["drought"]["base_score"])
-            signals.append(
-                make_signal(
-                    region=region["name"],
-                    commodity=commodity,
-                    anomaly_type="drought",
-                    anomaly_value=precip_mm_7d,
-                    severity_score=severity,
-                    market_score=MARKET_SENSITIVITY.get(commodity, 3),
-                    trade_bias=classify_trade_bias("drought", commodity),
-                    forecast_start=stats["forecast_start"],
-                    forecast_end=stats["forecast_end"],
-                    source_file=source_file,
-                    details=stats,
-                )
-            )
-
-        if wind_ms_max is not None and wind_ms_max >= RULES["storm_wind"]["wind_ms_max"]:
-            excess = wind_ms_max - RULES["storm_wind"]["wind_ms_max"]
-            severity = severity_from_excess(excess, RULES["storm_wind"]["severity_step_ms"], RULES["storm_wind"]["base_score"])
-            signals.append(
-                make_signal(
-                    region=region["name"],
-                    commodity=commodity,
-                    anomaly_type="storm_wind",
-                    anomaly_value=wind_ms_max,
-                    severity_score=severity,
-                    market_score=MARKET_SENSITIVITY.get(commodity, 3),
-                    trade_bias=classify_trade_bias("storm_wind", commodity),
-                    forecast_start=stats["forecast_start"],
-                    forecast_end=stats["forecast_end"],
-                    source_file=source_file,
-                    details=stats,
-                )
-            )
-
-    return signals
-
-
-def score_bucket(score: int) -> str:
-    if score >= 8:
-        return "HIGH CONVICTION"
-    if score >= 5:
-        return "ACTIONABLE"
-    return "EARLY SIGNAL"
-
-
-def build_asset_payload(commodity: str, trade_bias: str) -> dict:
-    base = ASSET_MAP.get(
-        commodity,
-        {
-            "best_vehicle": commodity,
-            "proxy_equities": [],
-            "secondary_exposures": [],
-        },
-    )
-
-    affected_assets = []
-    best_vehicle = base["best_vehicle"]
-    proxy_equities = base["proxy_equities"]
-    secondary_exposures = base["secondary_exposures"]
-
-    if best_vehicle:
-        affected_assets.append(
-            {
-                "symbol": best_vehicle,
-                "type": "vehicle",
-                "bias": trade_bias,
-                "priority": "primary",
-            }
-        )
-
-    for ticker in proxy_equities:
-        affected_assets.append(
-            {
-                "symbol": ticker,
-                "type": "equity",
-                "bias": trade_bias,
-                "priority": "direct",
-            }
-        )
-
-    for exposure in secondary_exposures:
-        affected_assets.append(
-            {
-                "symbol": exposure,
-                "type": "theme",
-                "bias": trade_bias,
-                "priority": "secondary",
-            }
-        )
-
-    return {
-        "best_vehicle": best_vehicle,
-        "proxy_equities": proxy_equities,
-        "secondary_exposures": secondary_exposures,
-        "affected_assets": affected_assets,
+def normalize_event_key(anomaly_type: str) -> str:
+    mapping = {
+        "extreme_heat": "heatwave",
+        "frost": "cold_wave",
+        "heavy_rain": "flood",
+        "flood_risk": "flood",
+        "storm_wind": "storm_wind",
+        "wildfire_risk": "wildfire",
+        "cold_wave": "cold_wave",
+        "hurricane_risk": "hurricane",
     }
+    return mapping.get(anomaly_type, anomaly_type)
 
 
-def build_recommendation(trade_bias: str, commodity: str, signal_level: int) -> str:
-    if trade_bias == "bullish":
-        if signal_level >= 8:
-            return f"High-conviction bullish setup in {commodity}"
-        if signal_level >= 5:
-            return f"Actionable bullish setup in {commodity}"
-        return f"Early bullish watch in {commodity}"
-
-    if trade_bias == "bearish":
-        if signal_level >= 8:
-            return f"High-conviction bearish setup in {commodity}"
-        if signal_level >= 5:
-            return f"Actionable bearish setup in {commodity}"
-        return f"Early bearish watch in {commodity}"
-
-    return f"Monitor {commodity} closely"
-
-
-def build_affected_market(commodity: str, payload: dict) -> str:
-    parts = [commodity]
-    if payload["proxy_equities"]:
-        parts.append("equities: " + ", ".join(payload["proxy_equities"]))
-    if payload["secondary_exposures"]:
-        parts.append("secondary: " + ", ".join(payload["secondary_exposures"]))
-    return " | ".join(parts)
-
-
-def build_what_changed(region: str, anomaly_type: str, anomaly_value: float, details: dict, commodity: str) -> str:
-    if anomaly_type in ("heatwave", "extreme_heat"):
-        return f"{region} is showing {anomaly_type.replace('_', ' ')} conditions. Peak forecast temperature for the scan window reached {anomaly_value:.1f}°C, creating stress for {commodity} exposure."
-    if anomaly_type == "frost":
-        return f"{region} is showing frost risk. Minimum forecast temperature fell to {anomaly_value:.1f}°C, which matters for {commodity} exposure."
-    if anomaly_type == "heavy_rain":
-        return f"{region} is showing heavy rainfall. Forecast precipitation reached {anomaly_value:.1f} mm over the scan window, affecting {commodity} exposure."
-    if anomaly_type == "drought":
-        temp_mean = details.get("temp_c_mean")
-        if temp_mean is not None:
-            return f"{region} is showing drought conditions: only {anomaly_value:.1f} mm of rain with average temperature near {temp_mean:.1f}°C. This matters for {commodity} exposure."
-        return f"{region} is showing drought conditions: only {anomaly_value:.1f} mm of rain in the scan window, affecting {commodity} exposure."
-    if anomaly_type == "storm_wind":
-        return f"{region} is showing storm-wind risk, with peak wind near {anomaly_value:.1f} m/s. This affects {commodity} exposure."
-    return f"{region} is showing a {anomaly_type} signal affecting {commodity}."
-
-
-def build_why_it_matters(anomaly_type: str, commodity: str, trade_bias: str) -> str:
-    readable = anomaly_type.replace("_", " ")
-    if trade_bias == "bullish":
-        return f"{readable.title()} can tighten supply or raise weather-driven demand risk for {commodity}, which may support prices and related equities."
-    if trade_bias == "bearish":
-        return f"{readable.title()} can improve supply conditions or reduce scarcity pricing for {commodity}, which may pressure prices and related equities."
-    return f"{readable.title()} may matter for {commodity}, but the market direction is not yet strong enough for a firm view."
-
-
-def build_what_to_watch_next(anomaly_type: str, region: str) -> str:
-    if anomaly_type in ("heatwave", "extreme_heat"):
-        return f"Watch the next ECMWF runs for persistence of extreme temperatures in {region}, plus any shift in rainfall relief."
-    if anomaly_type == "frost":
-        return f"Watch the next ECMWF runs for minimum-temperature persistence in {region} and whether the cold pocket expands."
-    if anomaly_type == "heavy_rain":
-        return f"Watch whether rainfall totals keep rising in {region} and whether flooding or planting/harvest disruption risk broadens."
-    if anomaly_type == "drought":
-        return f"Watch whether the dry pattern in {region} persists across the next runs and whether heat intensifies."
-    if anomaly_type == "storm_wind":
-        return f"Watch whether wind intensity and storm track remain stable in the next ECMWF runs for {region}."
-    return f"Watch the next ECMWF update for persistence in {region}."
+def build_radar_event_note(anomaly_type: str) -> str:
+    norm = normalize_event_key(anomaly_type)
+    rule = RADAR_EVENT_RULES.get(norm)
+    if not rule:
+        return anomaly_type.replace("_", " ").title()
+    return rule["description"]
 
 
 def make_signal(
@@ -761,8 +523,6 @@ def make_signal(
     source_file: str,
     details: dict,
 ) -> dict:
-    clean_details = sanitize_details(details)
-
     return {
         "timestamp": datetime.now(UTC),
         "region": region,
@@ -787,8 +547,166 @@ def make_signal(
         "forecast_start": forecast_start,
         "forecast_end": forecast_end,
         "source_file": os.path.basename(source_file),
-        "details": clean_details,
+        "details": sanitize_details(details),
     }
+
+
+def build_signals_from_stats(region: dict, stats: dict, source_file: str) -> list[dict]:
+    signals = []
+
+    temp_c_max = stats["temp_c_max"]
+    temp_c_mean = stats["temp_c_mean"]
+    temp_c_min = stats["temp_c_min"]
+    precip_mm_7d = stats["precip_mm_7d"]
+    wind_ms_max = stats["wind_ms_max"]
+
+    for commodity in region["commodities"]:
+        if temp_c_max is not None and temp_c_max >= RULES["heatwave"]["temp_c_max"]:
+            excess = temp_c_max - RULES["heatwave"]["temp_c_max"]
+            severity = severity_from_excess(excess, RULES["heatwave"]["severity_step_c"], RULES["heatwave"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "heatwave", temp_c_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("heatwave", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        if temp_c_max is not None and temp_c_max >= RULES["extreme_heat"]["temp_c_max"]:
+            excess = temp_c_max - RULES["extreme_heat"]["temp_c_max"]
+            severity = severity_from_excess(excess, RULES["extreme_heat"]["severity_step_c"], RULES["extreme_heat"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "extreme_heat", temp_c_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("extreme_heat", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        if temp_c_min is not None and temp_c_min <= RULES["frost"]["temp_c_min"]:
+            excess = RULES["frost"]["temp_c_min"] - temp_c_min
+            severity = severity_from_excess(excess, RULES["frost"]["severity_step_c"], RULES["frost"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "frost", temp_c_min, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("frost", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        if precip_mm_7d is not None and precip_mm_7d >= RULES["heavy_rain"]["precip_mm_7d"]:
+            excess = precip_mm_7d - RULES["heavy_rain"]["precip_mm_7d"]
+            severity = severity_from_excess(excess, RULES["heavy_rain"]["severity_step_mm"], RULES["heavy_rain"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "heavy_rain", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("heavy_rain", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        if (
+            precip_mm_7d is not None
+            and temp_c_mean is not None
+            and precip_mm_7d <= RULES["drought"]["precip_mm_7d_max"]
+            and temp_c_mean >= RULES["drought"]["temp_c_mean_min"]
+        ):
+            excess = RULES["drought"]["precip_mm_7d_max"] - precip_mm_7d
+            severity = severity_from_excess(excess, RULES["drought"]["severity_step_mm"], RULES["drought"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "drought", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("drought", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        if wind_ms_max is not None and wind_ms_max >= RULES["storm_wind"]["wind_ms_max"]:
+            excess = wind_ms_max - RULES["storm_wind"]["wind_ms_max"]
+            severity = severity_from_excess(excess, RULES["storm_wind"]["severity_step_ms"], RULES["storm_wind"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "storm_wind", wind_ms_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("storm_wind", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        if precip_mm_7d is not None and precip_mm_7d >= RULES["flood_risk"]["precip_mm_7d"]:
+            excess = precip_mm_7d - RULES["flood_risk"]["precip_mm_7d"]
+            severity = severity_from_excess(excess, RULES["flood_risk"]["severity_step_mm"], RULES["flood_risk"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "flood_risk", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("flood_risk", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        if (
+            temp_c_max is not None
+            and precip_mm_7d is not None
+            and wind_ms_max is not None
+            and temp_c_max >= RULES["wildfire_risk"]["temp_c_max"]
+            and precip_mm_7d <= RULES["wildfire_risk"]["precip_mm_7d_max"]
+            and wind_ms_max >= RULES["wildfire_risk"]["wind_ms_min"]
+        ):
+            excess = temp_c_max - RULES["wildfire_risk"]["temp_c_max"]
+            severity = severity_from_excess(excess, RULES["wildfire_risk"]["severity_step_c"], RULES["wildfire_risk"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "wildfire_risk", temp_c_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("wildfire_risk", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        if temp_c_min is not None and temp_c_min <= RULES["cold_wave"]["temp_c_min"]:
+            excess = RULES["cold_wave"]["temp_c_min"] - temp_c_min
+            severity = severity_from_excess(excess, RULES["cold_wave"]["severity_step_c"], RULES["cold_wave"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "cold_wave", temp_c_min, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("cold_wave", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        if (
+            wind_ms_max is not None
+            and precip_mm_7d is not None
+            and wind_ms_max >= RULES["hurricane_risk"]["wind_ms_max"]
+            and precip_mm_7d >= RULES["hurricane_risk"]["precip_mm_7d"]
+        ):
+            excess = wind_ms_max - RULES["hurricane_risk"]["wind_ms_max"]
+            severity = severity_from_excess(excess, RULES["hurricane_risk"]["severity_step_ms"], RULES["hurricane_risk"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "hurricane_risk", wind_ms_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("hurricane_risk", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+    return signals
+
+
+def score_bucket(score: int) -> str:
+    if score >= 8:
+        return "HIGH"
+    if score >= 5:
+        return "MEDIUM"
+    return "EARLY"
+
+
+def build_asset_payload(commodity: str, trade_bias: str) -> dict:
+    base = ASSET_MAP.get(
+        commodity,
+        {
+            "best_vehicle": commodity,
+            "proxy_equities": [],
+            "secondary_exposures": [],
+        },
+    )
+
+    affected_assets = []
+    if base["best_vehicle"]:
+        affected_assets.append({"symbol": base["best_vehicle"], "type": "vehicle", "bias": trade_bias, "priority": "primary"})
+    for ticker in base["proxy_equities"]:
+        affected_assets.append({"symbol": ticker, "type": "equity", "bias": trade_bias, "priority": "direct"})
+    for exposure in base["secondary_exposures"]:
+        affected_assets.append({"symbol": exposure, "type": "theme", "bias": trade_bias, "priority": "secondary"})
+
+    return {
+        "best_vehicle": base["best_vehicle"],
+        "proxy_equities": base["proxy_equities"],
+        "secondary_exposures": base["secondary_exposures"],
+        "affected_assets": affected_assets,
+    }
+
+
+def build_recommendation(trade_bias: str, commodity: str, signal_level: int) -> str:
+    if trade_bias == "bullish":
+        if signal_level >= 8:
+            return f"High-conviction long setup in {commodity}"
+        if signal_level >= 5:
+            return f"Actionable long setup in {commodity}"
+        return f"Early long watch in {commodity}"
+    if trade_bias == "bearish":
+        if signal_level >= 8:
+            return f"High-conviction short setup in {commodity}"
+        if signal_level >= 5:
+            return f"Actionable short setup in {commodity}"
+        return f"Early short watch in {commodity}"
+    return f"Monitor {commodity} closely"
+
+
+def build_affected_market(commodity: str, payload: dict) -> str:
+    parts = [commodity]
+    if payload["proxy_equities"]:
+        parts.append("equities: " + ", ".join(payload["proxy_equities"]))
+    if payload["secondary_exposures"]:
+        parts.append("secondary: " + ", ".join(payload["secondary_exposures"]))
+    return " | ".join(parts)
+
+
+def build_what_changed(region: str, anomaly_type: str, anomaly_value: float, details: dict, commodity: str) -> str:
+    label = build_radar_event_note(anomaly_type)
+    return f"{region} is showing {label.lower()} affecting {commodity}. Measured trigger value: {anomaly_value:.1f}."
+
+
+def build_why_it_matters(anomaly_type: str, commodity: str, trade_bias: str) -> str:
+    label = build_radar_event_note(anomaly_type)
+    if trade_bias == "bullish":
+        return f"{label} can tighten supply, disrupt logistics, or raise demand risk for {commodity}, which may support prices and related stocks."
+    if trade_bias == "bearish":
+        return f"{label} can damage operating conditions or pressure pricing for {commodity}, which may hurt prices and related stocks."
+    return f"{label} may matter for {commodity}, but the market direction is not yet strong enough for a firm view."
+
+
+def build_what_to_watch_next(anomaly_type: str, region: str) -> str:
+    label = build_radar_event_note(anomaly_type)
+    return f"Watch the next ECMWF runs to see whether {label.lower()} persists or intensifies in {region}."
 
 
 def enrich_persistence_and_signal(conn, signals: list[dict]) -> list[dict]:
@@ -835,13 +753,7 @@ def enrich_persistence_and_signal(conn, signals: list[dict]) -> list[dict]:
 
             s["recommendation"] = build_recommendation(s["trade_bias"], s["commodity"], signal_level)
             s["affected_market"] = build_affected_market(s["commodity"], asset_payload)
-            s["what_changed"] = build_what_changed(
-                s["region"],
-                s["anomaly_type"],
-                s["anomaly_value"],
-                s["details"],
-                s["commodity"],
-            )
+            s["what_changed"] = build_what_changed(s["region"], s["anomaly_type"], s["anomaly_value"], s["details"], s["commodity"])
             s["why_it_matters"] = build_why_it_matters(s["anomaly_type"], s["commodity"], s["trade_bias"])
             s["what_to_watch_next"] = build_what_to_watch_next(s["anomaly_type"], s["region"])
 
