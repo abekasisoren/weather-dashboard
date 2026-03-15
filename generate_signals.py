@@ -368,8 +368,10 @@ if not signals_df.empty:
 
 with psycopg.connect(DATABASE_URL) as conn:
     with conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS weather_signals")
+
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS weather_signals (
+            CREATE TABLE weather_signals (
                 id BIGSERIAL PRIMARY KEY,
                 region TEXT NOT NULL,
                 weather_event TEXT NOT NULL,
@@ -388,8 +390,6 @@ with psycopg.connect(DATABASE_URL) as conn:
                 updated_at TIMESTAMPTZ NOT NULL
             )
         """)
-
-        cur.execute("TRUNCATE TABLE weather_signals")
 
         if not signals_df.empty:
             cur.executemany("""
