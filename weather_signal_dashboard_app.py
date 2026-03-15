@@ -11,7 +11,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 st.set_page_config(page_title="Global Weather Signal Dashboard", layout="wide")
 
 st.title("Global Weather Signal Dashboard")
-st.caption("Early weather intelligence for markets ranked by global tradability, not just geography.")
+st.caption("Early weather intelligence for markets ranked like a trading radar.")
 
 if not DATABASE_URL:
     st.error("DATABASE_URL environment variable is not set.")
@@ -64,35 +64,64 @@ def safe_int(value, default=0) -> int:
         return default
 
 
-def compute_global_rank(row) -> float:
-    signal_level = safe_int(row.get("signal_level"), 0)
-    persistence = safe_int(row.get("persistence_score"), 0)
-    severity = safe_int(row.get("severity_score"), 0)
-    market_score = safe_int(row.get("market_score"), 0)
-
-    # More weight on final signal and persistence
-    return round(
-        (signal_level * 0.50)
-        + (persistence * 0.25)
-        + (severity * 0.15)
-        + (market_score * 0.10),
-        2,
-    )
-
-
-def score_bucket(score: int) -> str:
-    if score >= 8:
-        return "HIGH CONVICTION"
-    if score >= 5:
-        return "ACTIONABLE"
-    return "EARLY SIGNAL"
-
-
 def normalize_text(value, fallback="-") -> str:
     if value is None:
         return fallback
     text = str(value).strip()
     return text if text else fallback
+
+
+def score_bucket(score: int) -> str:
+    if score >= 8:
+        return "HIGH"
+    if score >= 5:
+        return "MEDIUM"
+    return "EARLY"
+
+
+def trade_label(value: str) -> str:
+    v = str(value).strip().lower()
+    if v == "bullish":
+        return "Long"
+    if v == "bearish":
+        return "Short"
+    return "No Trade"
+
+
+def conviction_badge(bucket: str) -> str:
+    bucket = normalize_text(bucket, "EARLY").upper()
+    if bucket == "HIGH":
+        return (
+            "<span style='background:#7f1d1d;color:#fecaca;padding:4px 10px;"
+            "border-radius:999px;font-weight:700;font-size:0.85rem;'>HIGH</span>"
+        )
+    if bucket == "MEDIUM":
+        return (
+            "<span style='background:#78350f;color:#fde68a;padding:4px 10px;"
+            "border-radius:999px;font-weight:700;font-size:0.85rem;'>MEDIUM</span>"
+        )
+    return (
+        "<span style='background:#334155;color:#cbd5e1;padding:4px 10px;"
+        "border-radius:999px;font-weight:700;font-size:0.85rem;'>EARLY</span>"
+    )
+
+
+def trade_badge(trade: str) -> str:
+    trade = normalize_text(trade, "No Trade")
+    if trade == "Long":
+        return (
+            "<span style='background:#14532d;color:#bbf7d0;padding:4px 10px;"
+            "border-radius:999px;font-weight:700;font-size:0.85rem;'>LONG</span>"
+        )
+    if trade == "Short":
+        return (
+            "<span style='background:#991b1b;color:#fecaca;padding:4px 10px;"
+            "border-radius:999px;font-weight:700;font-size:0.85rem;'>SHORT</span>"
+        )
+    return (
+        "<span style='background:#374151;color:#e5e7eb;padding:4px 10px;"
+        "border-radius:999px;font-weight:700;font-size:0.85rem;'>NO TRADE</span>"
+    )
 
 
 def get_asset_list(row) -> list[dict]:
@@ -104,78 +133,103 @@ def get_asset_list(row) -> list[dict]:
 
 def summarize_assets(row) -> str:
     assets = get_asset_list(row)
-    if not assets:
-        return normalize_text(row.get("proxy_equities"), "-")
+    if assets:
+        priority_order = {"primary": 0, "direct": 1, "secondary": 2}
+        assets = sorted(
+            assets,
+            key=lambda x: (
+                priority_order.get(str(x.get("priority", "")).lower(), 9),
+                str(x.get("symbol", "")),
+            ),
+        )
+        labels = []
+        for a in assets[:10]:
+            symbol = str(a.get("symbol", "")).strip()
+            if symbol:
+                labels.append(symbol)
+        if labels:
+            return ", ".join(labels)
 
-    priority_order = {"primary": 0, "direct": 1, "secondary": 2}
-    assets = sorted(
-        assets,
-        key=lambda x: (
-            priority_order.get(str(x.get("priority", "")).lower(), 9),
-            str(x.get("symbol", "")),
-        ),
-    )
+    proxy = normalize_text(row.get("proxy_equities"), "")
+    if proxy:
+        return proxy
 
-    labels = []
-    for a in assets[:10]:
-        symbol = str(a.get("symbol", "")).strip()
-        if symbol:
-            labels.append(symbol)
+    vehicle = normalize_text(row.get("best_vehicle"), "")
+    if vehicle:
+        return vehicle
 
-    return ", ".join(labels) if labels else "-"
+    return "-"
 
 
-def build_top_trade_label(row) -> str:
-    return (
-        f"{normalize_text(row.get('region'))} — "
-        f"{normalize_text(row.get('anomaly_type')).replace('_', ' ').title()} — "
-        f"{normalize_text(row.get('commodity'))}"
-    )
+def compute_sort_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for col in ["signal_level", "persistence_score", "severity_score", "market_score"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+        else:
+            df[col] = 0
+    return df
+
+
+def build_title(row) -> str:
+    region = normalize_text(row.get("region"))
+    anomaly = normalize_text(row.get("anomaly_type")).replace("_", " ").title()
+    commodity = normalize_text(row.get("commodity"))
+    return f"{region} — {anomaly} — {commodity}"
 
 
 def show_trade_card(row, rank_number=None):
-    title = build_top_trade_label(row)
-    rank_prefix = f"#{rank_number} " if rank_number is not None else ""
-    st.markdown(f"### {rank_prefix}{title}")
+    title = build_title(row)
+    prefix = f"#{rank_number} " if rank_number is not None else ""
+    trade = trade_label(row.get("trade_bias"))
+    bucket = normalize_text(row.get("signal_bucket"), score_bucket(safe_int(row.get("signal_level"))))
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Global Rank Score", row["global_rank_score"])
-    c2.metric("Signal Level", safe_int(row["signal_level"]))
-    c3.metric("Bucket", normalize_text(row["signal_bucket"], score_bucket(safe_int(row["signal_level"]))))
-    c4.metric("Trade Bias", normalize_text(row["trade_bias"]).title())
+    st.markdown(f"### {prefix}{title}")
 
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Persistence", safe_int(row["persistence_score"]))
-    c6.metric("Severity", safe_int(row["severity_score"]))
-    c7.metric("Market Score", safe_int(row["market_score"]))
-    c8.metric("Best Vehicle", normalize_text(row["best_vehicle"]))
+    badge_col1, badge_col2 = st.columns([1, 5])
+    with badge_col1:
+        st.markdown(trade_badge(trade), unsafe_allow_html=True)
+    with badge_col2:
+        st.markdown(conviction_badge(bucket), unsafe_allow_html=True)
 
+    c1, c2 = st.columns([2, 3])
+    with c1:
+        st.markdown(f"**Vehicle:** {normalize_text(row.get('best_vehicle'))}")
+    with c2:
+        st.markdown(f"**Assets:** {summarize_assets(row)}")
+
+    st.markdown(f"**Why this matters:** {normalize_text(row.get('why_it_matters'))}")
     st.markdown(f"**Recommendation:** {normalize_text(row.get('recommendation'))}")
-    st.markdown(f"**Affected Market:** {normalize_text(row.get('affected_market'))}")
-    st.markdown(f"**Proxy Equities / Assets:** {summarize_assets(row)}")
     st.markdown(f"**Forecast Window:** {format_dt(row.get('forecast_start'))} → {format_dt(row.get('forecast_end'))}")
 
-    with st.expander("Full trade breakdown"):
+    with st.expander("Full breakdown"):
         st.markdown("**What changed**")
         st.write(normalize_text(row.get("what_changed")))
 
-        st.markdown("**Why it matters**")
-        st.write(normalize_text(row.get("why_it_matters")))
+        st.markdown("**Affected market**")
+        st.write(normalize_text(row.get("affected_market")))
 
         st.markdown("**What to watch next**")
         st.write(normalize_text(row.get("what_to_watch_next")))
 
-        st.markdown("**Secondary Exposures**")
+        st.markdown("**Secondary exposures**")
         st.write(normalize_text(row.get("secondary_exposures")))
 
-        st.markdown("**Affected Assets JSON**")
+        st.markdown("**Internal scores**")
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Signal", safe_int(row.get("signal_level")))
+        s2.metric("Persistence", safe_int(row.get("persistence_score")))
+        s3.metric("Severity", safe_int(row.get("severity_score")))
+        s4.metric("Market", safe_int(row.get("market_score")))
+
+        st.markdown("**Affected assets JSON**")
         assets = get_asset_list(row)
         if assets:
             st.json(assets)
         else:
             st.write("No asset payload available.")
 
-        st.markdown("**Weather Details**")
+        st.markdown("**Weather details**")
         details = parse_jsonish(row.get("details"))
         if isinstance(details, dict) and details:
             st.json(details)
@@ -226,70 +280,63 @@ if df.empty:
     st.warning("No weather shocks found yet.")
     st.stop()
 
-for col in ["signal_level", "persistence_score", "severity_score", "market_score"]:
-    if col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+df = compute_sort_columns(df)
+df["signal_bucket"] = df["signal_bucket"].fillna(df["signal_level"].apply(score_bucket))
+df["trade_display"] = df["trade_bias"].apply(trade_label)
 
-df["global_rank_score"] = df.apply(compute_global_rank, axis=1)
-
-# Keep only strongest recent duplicate per region/commodity/anomaly
 df = (
     df.sort_values(
-        by=["global_rank_score", "signal_level", "created_at"],
-        ascending=[False, False, False],
+        by=["signal_level", "persistence_score", "market_score", "severity_score", "created_at"],
+        ascending=[False, False, False, False, False],
     )
     .drop_duplicates(subset=["region", "commodity", "anomaly_type"], keep="first")
     .reset_index(drop=True)
 )
 
-# Sidebar filters
 st.sidebar.header("Filters")
 
-all_buckets = ["HIGH CONVICTION", "ACTIONABLE", "EARLY SIGNAL"]
-bucket_filter = st.sidebar.multiselect(
-    "Signal Bucket",
-    options=all_buckets,
-    default=all_buckets,
+bucket_options = ["HIGH", "MEDIUM", "EARLY"]
+selected_buckets = st.sidebar.multiselect(
+    "Conviction",
+    options=bucket_options,
+    default=bucket_options,
 )
 
-all_biases = sorted([b for b in df["trade_bias"].dropna().astype(str).unique().tolist() if b])
-bias_filter = st.sidebar.multiselect(
-    "Trade Bias",
-    options=all_biases,
-    default=all_biases,
+trade_options = ["Long", "Short", "No Trade"]
+selected_trades = st.sidebar.multiselect(
+    "Trade",
+    options=trade_options,
+    default=trade_options,
 )
 
-all_regions = sorted(df["region"].dropna().astype(str).unique().tolist())
-region_filter = st.sidebar.multiselect(
+region_options = sorted(df["region"].dropna().astype(str).unique().tolist())
+selected_regions = st.sidebar.multiselect(
     "Region",
-    options=all_regions,
-    default=all_regions,
+    options=region_options,
+    default=region_options,
 )
 
-all_commodities = sorted(df["commodity"].dropna().astype(str).unique().tolist())
-commodity_filter = st.sidebar.multiselect(
+commodity_options = sorted(df["commodity"].dropna().astype(str).unique().tolist())
+selected_commodities = st.sidebar.multiselect(
     "Commodity",
-    options=all_commodities,
-    default=all_commodities,
+    options=commodity_options,
+    default=commodity_options,
 )
 
-min_signal = st.sidebar.slider("Minimum Signal Level", min_value=1, max_value=10, value=1)
-top_n = st.sidebar.slider("Show Top Global Trades", min_value=3, max_value=25, value=10)
+min_signal = st.sidebar.slider("Minimum Signal", min_value=1, max_value=10, value=1)
+top_n = st.sidebar.slider("Top Trades to Show", min_value=3, max_value=25, value=10)
 
-filtered = df.copy()
-filtered["signal_bucket"] = filtered["signal_bucket"].fillna(filtered["signal_level"].apply(score_bucket))
-
-filtered = filtered[
-    filtered["signal_bucket"].isin(bucket_filter)
-    & filtered["trade_bias"].astype(str).isin(bias_filter)
-    & filtered["region"].astype(str).isin(region_filter)
-    & filtered["commodity"].astype(str).isin(commodity_filter)
-    & (filtered["signal_level"] >= min_signal)
+filtered = df[
+    df["signal_bucket"].isin(selected_buckets)
+    & df["trade_display"].isin(selected_trades)
+    & df["region"].astype(str).isin(selected_regions)
+    & df["commodity"].astype(str).isin(selected_commodities)
+    & (df["signal_level"] >= min_signal)
 ].copy()
 
 filtered = filtered.sort_values(
-    by=["global_rank_score", "signal_level", "persistence_score", "market_score"],
-    ascending=[False, False, False, False],
+    by=["signal_level", "persistence_score", "market_score", "severity_score", "created_at"],
+    ascending=[False, False, False, False, False],
 ).reset_index(drop=True)
 
 last_update = None
@@ -298,84 +345,69 @@ if "created_at" in filtered.columns and not filtered["created_at"].isna().all():
 elif "created_at" in df.columns and not df["created_at"].isna().all():
     last_update = df["created_at"].max()
 
-if last_update is not None:
-    st.write("Last update:", format_dt(last_update))
+top_long = "-"
+top_short = "-"
+if not filtered[filtered["trade_display"] == "Long"].empty:
+    top_long = build_title(filtered[filtered["trade_display"] == "Long"].iloc[0])
+if not filtered[filtered["trade_display"] == "Short"].empty:
+    top_short = build_title(filtered[filtered["trade_display"] == "Short"].iloc[0])
 
-# Summary metrics
-high_count = int((filtered["signal_level"] >= 8).sum())
-actionable_count = int(((filtered["signal_level"] >= 5) & (filtered["signal_level"] < 8)).sum())
-early_count = int((filtered["signal_level"] < 5).sum())
-bullish_count = int((filtered["trade_bias"].astype(str) == "bullish").sum())
-bearish_count = int((filtered["trade_bias"].astype(str) == "bearish").sum())
+high_count = int((filtered["signal_bucket"] == "HIGH").sum())
 
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Filtered Trades", len(filtered))
-m2.metric("High Conviction", high_count)
-m3.metric("Actionable", actionable_count)
-m4.metric("Bullish", bullish_count)
-m5.metric("Bearish", bearish_count)
+st.header("📡 Market Radar")
+
+r1, r2, r3, r4 = st.columns(4)
+r1.metric("Top Long", top_long)
+r2.metric("Top Short", top_short)
+r3.metric("High Conviction", high_count)
+r4.metric("Last Update", format_dt(last_update) if last_update is not None else "-")
 
 st.header("🌍 Top Global Trades Right Now")
 
 if filtered.empty:
     st.write("No trades match the current filters.")
 else:
-    top_global = filtered.head(top_n).copy()
-    for idx, (_, row) in enumerate(top_global.iterrows(), start=1):
+    top_df = filtered.head(top_n).copy()
+    for idx, (_, row) in enumerate(top_df.iterrows(), start=1):
         show_trade_card(row, rank_number=idx)
 
-st.header("📊 Global Ranking Table")
+st.header("📊 Simple Ranking Table")
 
-ranking_table = filtered[
+table_df = filtered[
     [
         "region",
         "commodity",
         "anomaly_type",
-        "trade_bias",
+        "trade_display",
         "signal_bucket",
         "signal_level",
         "persistence_score",
-        "severity_score",
         "market_score",
-        "global_rank_score",
+        "severity_score",
         "best_vehicle",
-        "proxy_equities",
         "recommendation",
     ]
 ].copy()
 
-ranking_table = ranking_table.rename(
+table_df = table_df.rename(
     columns={
         "region": "Region",
         "commodity": "Commodity",
         "anomaly_type": "Anomaly",
-        "trade_bias": "Bias",
-        "signal_bucket": "Bucket",
+        "trade_display": "Trade",
+        "signal_bucket": "Conviction",
         "signal_level": "Signal",
         "persistence_score": "Persistence",
-        "severity_score": "Severity",
         "market_score": "Market",
-        "global_rank_score": "Rank Score",
-        "best_vehicle": "Best Vehicle",
-        "proxy_equities": "Proxy Equities",
+        "severity_score": "Severity",
+        "best_vehicle": "Vehicle",
         "recommendation": "Recommendation",
     }
 )
 
-st.dataframe(ranking_table, use_container_width=True)
+table_df["Anomaly"] = table_df["Anomaly"].astype(str).str.replace("_", " ").str.title()
 
-st.header("🔥 High Conviction Only")
-high_conviction = filtered[filtered["signal_level"] >= 8].copy()
-if high_conviction.empty:
-    st.write("No high-conviction trades right now.")
-else:
-    for _, row in high_conviction.iterrows():
-        with st.expander(build_top_trade_label(row)):
-            st.write(normalize_text(row.get("recommendation")))
-            st.write(normalize_text(row.get("what_changed")))
-            st.write(normalize_text(row.get("why_it_matters")))
-            st.markdown(f"**Assets:** {summarize_assets(row)}")
+st.dataframe(table_df, use_container_width=True)
 
 with st.expander("Raw filtered table"):
     st.dataframe(filtered, use_container_width=True)
-    
