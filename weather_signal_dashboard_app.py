@@ -17,6 +17,54 @@ if not DATABASE_URL:
     st.error("DATABASE_URL environment variable is not set.")
     st.stop()
 
+ASSET_MAP = {
+    "Corn": {
+        "vehicle": "Corn futures / CORN ETF",
+        "stocks": ["ADM", "BG", "CF", "MOS", "CTVA", "DE", "UNP"],
+        "themes": ["ethanol producers", "grain handlers", "rail logistics", "crop insurers", "farm equipment"],
+    },
+    "Soybeans": {
+        "vehicle": "Soybean futures / SOYB ETF",
+        "stocks": ["ADM", "BG", "CF", "MOS", "CTVA", "DE"],
+        "themes": ["soy processors", "export terminals", "fertilizer names", "farm equipment"],
+    },
+    "Wheat": {
+        "vehicle": "Wheat futures / WEAT ETF",
+        "stocks": ["ADM", "BG", "MOS", "CF", "DE"],
+        "themes": ["grain traders", "fertilizer names", "farm equipment", "food inflation proxies"],
+    },
+    "Coffee": {
+        "vehicle": "Coffee futures / JO ETF",
+        "stocks": ["SBUX", "NSRGY"],
+        "themes": ["coffee roasters", "packaged beverage names", "soft commodities traders"],
+    },
+    "Sugar": {
+        "vehicle": "Sugar futures / CANE ETF",
+        "stocks": ["CZZ", "TRRJF"],
+        "themes": ["ethanol-linked producers", "food input cost proxies", "soft commodities traders"],
+    },
+    "Natural Gas": {
+        "vehicle": "Natural gas futures / UNG ETF",
+        "stocks": ["EQT", "CTRA", "RRC", "LNG"],
+        "themes": ["LNG exporters", "gas-sensitive utilities", "power generators", "industrial demand proxies"],
+    },
+    "Power Utilities": {
+        "vehicle": "European utilities / power-sensitive names",
+        "stocks": ["NGG", "IBE.MC", "EOAN.DE", "ENGIY"],
+        "themes": ["power generators", "grid operators", "gas-sensitive industrials"],
+    },
+    "Rice": {
+        "vehicle": "Rice futures / regional agri proxies",
+        "stocks": ["ADM", "BG"],
+        "themes": ["food staples", "Asian agri merchants", "supply-chain logistics"],
+    },
+    "Coal": {
+        "vehicle": "Coal producers / coal-linked equities",
+        "stocks": ["BTU", "ARCH", "AMR"],
+        "themes": ["bulk shipping", "power generation", "rail freight"],
+    },
+}
+
 
 def read_sql(query: str) -> pd.DataFrame:
     with psycopg.connect(DATABASE_URL) as conn:
@@ -30,7 +78,6 @@ def read_sql(query: str) -> pd.DataFrame:
 def format_dt(value) -> str:
     if value is None:
         return "-"
-
     try:
         if pd.isna(value):
             return "-"
@@ -64,9 +111,7 @@ def format_dt(value) -> str:
 def parse_jsonish(value):
     if value is None:
         return {}
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, list):
+    if isinstance(value, (dict, list)):
         return value
     if isinstance(value, str):
         text = value.strip()
@@ -91,13 +136,11 @@ def safe_int(value, default=0) -> int:
 def normalize_text(value, fallback="-") -> str:
     if value is None:
         return fallback
-
     try:
         if pd.isna(value):
             return fallback
     except Exception:
         pass
-
     text = str(value).strip()
     if not text or text.lower() in {"nat", "nan", "none"}:
         return fallback
@@ -114,58 +157,81 @@ def score_bucket(score: int) -> str:
 
 def trade_label(value: str) -> str:
     v = str(value).strip().lower()
-    if v == "bullish":
+    if v in {"bullish", "long"}:
         return "Long"
-    if v == "bearish":
+    if v in {"bearish", "short"}:
         return "Short"
-    if v == "long":
+    return "No Trade"
+
+
+def infer_trade_from_row(row) -> str:
+    existing = trade_label(row.get("trade_bias"))
+    if existing != "No Trade":
+        return existing
+
+    commodity = normalize_text(row.get("commodity"), "")
+    anomaly = normalize_text(row.get("anomaly_type"), "").lower()
+
+    ags = {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar"}
+    utilities = {"Natural Gas", "Power Utilities", "Coal"}
+
+    if anomaly in {"heatwave", "extreme_heat", "drought", "frost"} and commodity in ags.union(utilities):
         return "Long"
-    if v == "short":
-        return "Short"
+
+    if anomaly == "heavy_rain":
+        if commodity in {"Natural Gas", "Power Utilities"}:
+            return "Long"
+        if commodity in ags:
+            return "Short"
+
+    if anomaly == "storm_wind" and commodity in utilities:
+        return "Long"
+
     return "No Trade"
 
 
 def conviction_badge(bucket: str) -> str:
     bucket = normalize_text(bucket, "EARLY").upper()
     if bucket == "HIGH":
-        return (
-            "<span style='background:#7f1d1d;color:#fecaca;padding:4px 10px;"
-            "border-radius:999px;font-weight:700;font-size:0.85rem;'>HIGH</span>"
-        )
+        return "<span style='background:#7f1d1d;color:#fecaca;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>HIGH</span>"
     if bucket == "MEDIUM":
-        return (
-            "<span style='background:#78350f;color:#fde68a;padding:4px 10px;"
-            "border-radius:999px;font-weight:700;font-size:0.85rem;'>MEDIUM</span>"
-        )
-    return (
-        "<span style='background:#334155;color:#cbd5e1;padding:4px 10px;"
-        "border-radius:999px;font-weight:700;font-size:0.85rem;'>EARLY</span>"
-    )
+        return "<span style='background:#78350f;color:#fde68a;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>MEDIUM</span>"
+    return "<span style='background:#334155;color:#cbd5e1;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>EARLY</span>"
 
 
 def trade_badge(trade: str) -> str:
-    trade = normalize_text(trade, "No Trade")
     if trade == "Long":
-        return (
-            "<span style='background:#14532d;color:#bbf7d0;padding:4px 10px;"
-            "border-radius:999px;font-weight:700;font-size:0.85rem;'>LONG</span>"
-        )
+        return "<span style='background:#14532d;color:#bbf7d0;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>LONG</span>"
     if trade == "Short":
-        return (
-            "<span style='background:#991b1b;color:#fecaca;padding:4px 10px;"
-            "border-radius:999px;font-weight:700;font-size:0.85rem;'>SHORT</span>"
-        )
-    return (
-        "<span style='background:#374151;color:#e5e7eb;padding:4px 10px;"
-        "border-radius:999px;font-weight:700;font-size:0.85rem;'>NO TRADE</span>"
+        return "<span style='background:#991b1b;color:#fecaca;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>SHORT</span>"
+    return "<span style='background:#374151;color:#e5e7eb;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>NO TRADE</span>"
+
+
+def get_asset_map(commodity: str) -> dict:
+    return ASSET_MAP.get(
+        commodity,
+        {"vehicle": commodity, "stocks": [], "themes": []},
     )
 
 
 def get_asset_list(row) -> list[dict]:
     payload = parse_jsonish(row.get("affected_assets_json"))
-    if isinstance(payload, list):
+    if isinstance(payload, list) and payload:
         return payload
-    return []
+
+    commodity = normalize_text(row.get("commodity"), "")
+    trade = infer_trade_from_row(row)
+    base = get_asset_map(commodity)
+    assets = []
+
+    if base["vehicle"]:
+        assets.append({"symbol": base["vehicle"], "type": "vehicle", "bias": trade, "priority": "primary"})
+    for s in base["stocks"]:
+        assets.append({"symbol": s, "type": "equity", "bias": trade, "priority": "direct"})
+    for t in base["themes"]:
+        assets.append({"symbol": t, "type": "theme", "bias": trade, "priority": "secondary"})
+
+    return assets
 
 
 def summarize_assets(row) -> str:
@@ -191,11 +257,78 @@ def summarize_assets(row) -> str:
     if proxy:
         return proxy
 
-    vehicle = normalize_text(row.get("best_vehicle"), "")
-    if vehicle:
-        return vehicle
-
     return "-"
+
+
+def get_vehicle(row) -> str:
+    existing = normalize_text(row.get("best_vehicle"), "")
+    if existing:
+        return existing
+    commodity = normalize_text(row.get("commodity"), "")
+    return get_asset_map(commodity)["vehicle"]
+
+
+def get_stock_recommendation(row) -> str:
+    commodity = normalize_text(row.get("commodity"), "")
+    trade = infer_trade_from_row(row)
+    stocks = get_asset_map(commodity)["stocks"]
+
+    if stocks:
+        stock_text = ", ".join(stocks[:5])
+    else:
+        stock_text = commodity
+
+    if trade == "Long":
+        return f"Long {stock_text}"
+    if trade == "Short":
+        return f"Short {stock_text}"
+    return f"Watch {stock_text}"
+
+
+def get_why_it_matters(row) -> str:
+    existing = normalize_text(row.get("why_it_matters"), "")
+    if existing:
+        return existing
+
+    anomaly = normalize_text(row.get("anomaly_type"), "").replace("_", " ")
+    commodity = normalize_text(row.get("commodity"), "")
+    trade = infer_trade_from_row(row)
+
+    if trade == "Long":
+        return f"{anomaly.title()} can tighten supply or raise weather risk for {commodity}, which may support prices and related stocks."
+    if trade == "Short":
+        return f"{anomaly.title()} can improve supply conditions or pressure pricing in {commodity}, which may weigh on related stocks."
+    return f"{anomaly.title()} may matter for {commodity}, but the setup is not strong enough yet for a clear trade."
+
+
+def get_recommendation(row) -> str:
+    existing = normalize_text(row.get("recommendation"), "")
+    if existing:
+        return existing
+    return get_stock_recommendation(row)
+
+
+def get_affected_market(row) -> str:
+    existing = normalize_text(row.get("affected_market"), "")
+    if existing:
+        return existing
+
+    commodity = normalize_text(row.get("commodity"), "")
+    base = get_asset_map(commodity)
+    parts = [commodity]
+    if base["stocks"]:
+        parts.append("stocks: " + ", ".join(base["stocks"]))
+    if base["themes"]:
+        parts.append("themes: " + ", ".join(base["themes"]))
+    return " | ".join(parts)
+
+
+def get_secondary_exposures(row) -> str:
+    existing = normalize_text(row.get("secondary_exposures"), "")
+    if existing:
+        return existing
+    commodity = normalize_text(row.get("commodity"), "")
+    return ", ".join(get_asset_map(commodity)["themes"]) or "-"
 
 
 def compute_sort_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -218,7 +351,7 @@ def build_title(row) -> str:
 def show_trade_card(row, rank_number=None):
     title = build_title(row)
     prefix = f"#{rank_number} " if rank_number is not None else ""
-    trade = trade_label(row.get("trade_bias"))
+    trade = infer_trade_from_row(row)
     bucket = normalize_text(row.get("signal_bucket"), score_bucket(safe_int(row.get("signal_level"))))
 
     st.markdown(f"### {prefix}{title}")
@@ -231,26 +364,29 @@ def show_trade_card(row, rank_number=None):
 
     c1, c2 = st.columns([2, 3])
     with c1:
-        st.markdown(f"**Vehicle:** {normalize_text(row.get('best_vehicle'))}")
+        st.markdown(f"**Vehicle:** {get_vehicle(row)}")
     with c2:
-        st.markdown(f"**Assets:** {summarize_assets(row)}")
+        st.markdown(f"**Stock Recommendation:** {get_stock_recommendation(row)}")
 
-    st.markdown(f"**Why this matters:** {normalize_text(row.get('why_it_matters'))}")
-    st.markdown(f"**Recommendation:** {normalize_text(row.get('recommendation'))}")
+    st.markdown(f"**Why this matters:** {get_why_it_matters(row)}")
+    st.markdown(f"**Assets:** {summarize_assets(row)}")
     st.markdown(f"**Forecast Window:** {format_dt(row.get('forecast_start'))} → {format_dt(row.get('forecast_end'))}")
 
     with st.expander("Full breakdown"):
-        st.markdown("**What changed**")
-        st.write(normalize_text(row.get("what_changed")))
+        st.markdown("**Recommendation**")
+        st.write(get_recommendation(row))
 
         st.markdown("**Affected market**")
-        st.write(normalize_text(row.get("affected_market")))
+        st.write(get_affected_market(row))
+
+        st.markdown("**What changed**")
+        st.write(normalize_text(row.get("what_changed")))
 
         st.markdown("**What to watch next**")
         st.write(normalize_text(row.get("what_to_watch_next")))
 
         st.markdown("**Secondary exposures**")
-        st.write(normalize_text(row.get("secondary_exposures")))
+        st.write(get_secondary_exposures(row))
 
         st.markdown("**Internal scores**")
         s1, s2, s3, s4 = st.columns(4)
@@ -319,7 +455,7 @@ if df.empty:
 
 df = compute_sort_columns(df)
 df["signal_bucket"] = df["signal_bucket"].fillna(df["signal_level"].apply(score_bucket))
-df["trade_display"] = df["trade_bias"].apply(trade_label)
+df["trade_display"] = df.apply(infer_trade_from_row, axis=1)
 
 df = (
     df.sort_values(
@@ -333,32 +469,16 @@ df = (
 st.sidebar.header("Filters")
 
 bucket_options = ["HIGH", "MEDIUM", "EARLY"]
-selected_buckets = st.sidebar.multiselect(
-    "Conviction",
-    options=bucket_options,
-    default=bucket_options,
-)
+selected_buckets = st.sidebar.multiselect("Conviction", bucket_options, default=bucket_options)
 
 trade_options = ["Long", "Short", "No Trade"]
-selected_trades = st.sidebar.multiselect(
-    "Trade",
-    options=trade_options,
-    default=trade_options,
-)
+selected_trades = st.sidebar.multiselect("Trade", trade_options, default=trade_options)
 
 region_options = sorted(df["region"].dropna().astype(str).unique().tolist())
-selected_regions = st.sidebar.multiselect(
-    "Region",
-    options=region_options,
-    default=region_options,
-)
+selected_regions = st.sidebar.multiselect("Region", region_options, default=region_options)
 
 commodity_options = sorted(df["commodity"].dropna().astype(str).unique().tolist())
-selected_commodities = st.sidebar.multiselect(
-    "Commodity",
-    options=commodity_options,
-    default=commodity_options,
-)
+selected_commodities = st.sidebar.multiselect("Commodity", commodity_options, default=commodity_options)
 
 min_signal = st.sidebar.slider("Minimum Signal", min_value=1, max_value=10, value=1)
 top_n = st.sidebar.slider("Top Trades to Show", min_value=3, max_value=25, value=10)
@@ -424,10 +544,11 @@ table_df = filtered[
         "persistence_score",
         "market_score",
         "severity_score",
-        "best_vehicle",
-        "recommendation",
     ]
 ].copy()
+
+table_df["Vehicle"] = filtered.apply(get_vehicle, axis=1)
+table_df["Stock Recommendation"] = filtered.apply(get_stock_recommendation, axis=1)
 
 table_df = table_df.rename(
     columns={
@@ -440,8 +561,6 @@ table_df = table_df.rename(
         "persistence_score": "Persistence",
         "market_score": "Market",
         "severity_score": "Severity",
-        "best_vehicle": "Vehicle",
-        "recommendation": "Recommendation",
     }
 )
 
