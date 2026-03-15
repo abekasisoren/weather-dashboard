@@ -269,23 +269,6 @@ def find_latest_grib() -> str:
     return files[0]
 
 
-def open_grib_dataset(path: str) -> xr.Dataset:
-    backend_kwargs = {"indexpath": ""}
-    return xr.open_dataset(path, engine="cfgrib", backend_kwargs=backend_kwargs)
-
-
-def normalize_longitudes(ds: xr.Dataset) -> xr.Dataset:
-    lon_name = get_coord_name(ds, ["longitude", "lon", "long"])
-    if lon_name is None:
-        return ds
-
-    lon_vals = ds[lon_name].values
-    if np.nanmax(lon_vals) > 180:
-        new_lon = ((lon_vals + 180) % 360) - 180
-        ds = ds.assign_coords({lon_name: new_lon}).sortby(lon_name)
-    return ds
-
-
 def get_coord_name(ds: xr.Dataset, options: list[str]) -> str | None:
     for name in options:
         if name in ds.coords:
@@ -298,6 +281,35 @@ def get_var_name(ds: xr.Dataset, options: list[str]) -> str | None:
         if name in ds.data_vars:
             return name
     return None
+
+
+def open_grib_dataset(path: str) -> xr.Dataset:
+    backend_kwargs = {"indexpath": ""}
+    ds = xr.open_dataset(path, engine="cfgrib", backend_kwargs=backend_kwargs)
+    return ds
+
+
+def open_grib_dataset_filtered(path: str, filter_by_keys: dict) -> xr.Dataset | None:
+    try:
+        backend_kwargs = {
+            "indexpath": "",
+            "filter_by_keys": filter_by_keys,
+        }
+        return xr.open_dataset(path, engine="cfgrib", backend_kwargs=backend_kwargs)
+    except Exception:
+        return None
+
+
+def normalize_longitudes(ds: xr.Dataset) -> xr.Dataset:
+    lon_name = get_coord_name(ds, ["longitude", "lon", "long"])
+    if lon_name is None:
+        return ds
+
+    lon_vals = ds[lon_name].values
+    if np.nanmax(lon_vals) > 180:
+        new_lon = ((lon_vals + 180) % 360) - 180
+        ds = ds.assign_coords({lon_name: new_lon}).sortby(lon_name)
+    return ds
 
 
 def subset_region(da: xr.DataArray, region: dict) -> xr.DataArray:
@@ -339,15 +351,30 @@ def trim_forecast_horizon(da: xr.DataArray) -> xr.DataArray:
     return da
 
 
-def extract_field_stats(ds: xr.Dataset, region: dict) -> dict:
-    ds = normalize_longitudes(ds)
+def safe_datetime_for_json(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    try:
+        return pd.to_datetime(value).isoformat()
+    except Exception:
+        return str(value)
 
-    t_name = get_var_name(ds, ["t2m", "2t"])
-    tp_name = get_var_name(ds, ["tp", "total_precipitation"])
-    wind_name = get_var_name(ds, ["si10", "wind10m", "ws10"])
-    u10_name = get_var_name(ds, ["u10", "10u"])
-    v10_name = get_var_name(ds, ["v10", "10v"])
 
+def sanitize_details(details: dict) -> dict:
+    clean = {}
+    for k, v in details.items():
+        if isinstance(v, datetime):
+            clean[k] = v.isoformat()
+        elif isinstance(v, np.generic):
+            clean[k] = v.item()
+        else:
+            clean[k] = v
+    return clean
+
+
+def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> dict:
     stats = {
         "temp_c_max": None,
         "temp_c_mean": None,
@@ -358,8 +385,17 @@ def extract_field_stats(ds: xr.Dataset, region: dict) -> dict:
         "forecast_end": None,
     }
 
+    # Temperature from main dataset or filtered fallback
+    ds_temp = normalize_longitudes(main_ds)
+    t_name = get_var_name(ds_temp, ["t2m", "2t"])
+    if t_name is None:
+        fallback = open_grib_dataset_filtered(source_file, {"shortName": "2t"})
+        if fallback is not None:
+            ds_temp = normalize_longitudes(fallback)
+            t_name = get_var_name(ds_temp, ["t2m", "2t"])
+
     if t_name:
-        t = trim_forecast_horizon(subset_region(ds[t_name], region))
+        t = trim_forecast_horizon(subset_region(ds_temp[t_name], region))
         if "valid_time" in t.coords:
             times = pd.to_datetime(t["valid_time"].values)
         elif "time" in t.coords:
@@ -374,8 +410,17 @@ def extract_field_stats(ds: xr.Dataset, region: dict) -> dict:
         stats["forecast_start"] = pd.Timestamp(times.min()).to_pydatetime()
         stats["forecast_end"] = pd.Timestamp(times.max()).to_pydatetime()
 
+    # Precipitation
+    ds_tp = normalize_longitudes(main_ds)
+    tp_name = get_var_name(ds_tp, ["tp", "total_precipitation"])
+    if tp_name is None:
+        fallback = open_grib_dataset_filtered(source_file, {"shortName": "tp"})
+        if fallback is not None:
+            ds_tp = normalize_longitudes(fallback)
+            tp_name = get_var_name(ds_tp, ["tp", "total_precipitation"])
+
     if tp_name:
-        tp = trim_forecast_horizon(subset_region(ds[tp_name], region))
+        tp = trim_forecast_horizon(subset_region(ds_tp[tp_name], region))
         precip_mm = tp * 1000.0
         stats["precip_mm_7d"] = float(precip_mm.sum(skipna=True).values)
 
@@ -389,14 +434,41 @@ def extract_field_stats(ds: xr.Dataset, region: dict) -> dict:
             stats["forecast_start"] = pd.Timestamp(times.min()).to_pydatetime()
             stats["forecast_end"] = pd.Timestamp(times.max()).to_pydatetime()
 
+    # Wind: try si10 first, then u10/v10 with height filter
+    ds_wind = normalize_longitudes(main_ds)
+    wind_name = get_var_name(ds_wind, ["si10", "wind10m", "ws10"])
+    u10_name = get_var_name(ds_wind, ["u10", "10u"])
+    v10_name = get_var_name(ds_wind, ["v10", "10v"])
+
     if wind_name:
-        wind = trim_forecast_horizon(subset_region(ds[wind_name], region))
+        wind = trim_forecast_horizon(subset_region(ds_wind[wind_name], region))
         stats["wind_ms_max"] = float(wind.max(skipna=True).values)
-    elif u10_name and v10_name:
-        u = trim_forecast_horizon(subset_region(ds[u10_name], region))
-        v = trim_forecast_horizon(subset_region(ds[v10_name], region))
-        w = np.sqrt((u ** 2) + (v ** 2))
-        stats["wind_ms_max"] = float(w.max(skipna=True).values)
+    else:
+        if u10_name is None:
+            fallback_u = open_grib_dataset_filtered(source_file, {"shortName": "10u", "typeOfLevel": "heightAboveGround", "level": 10})
+            if fallback_u is not None:
+                ds_u = normalize_longitudes(fallback_u)
+                u10_name = get_var_name(ds_u, ["u10", "10u"])
+            else:
+                ds_u = None
+        else:
+            ds_u = ds_wind
+
+        if v10_name is None:
+            fallback_v = open_grib_dataset_filtered(source_file, {"shortName": "10v", "typeOfLevel": "heightAboveGround", "level": 10})
+            if fallback_v is not None:
+                ds_v = normalize_longitudes(fallback_v)
+                v10_name = get_var_name(ds_v, ["v10", "10v"])
+            else:
+                ds_v = None
+        else:
+            ds_v = ds_wind
+
+        if u10_name and v10_name and ds_u is not None and ds_v is not None:
+            u = trim_forecast_horizon(subset_region(ds_u[u10_name], region))
+            v = trim_forecast_horizon(subset_region(ds_v[v10_name], region))
+            w = np.sqrt((u ** 2) + (v ** 2))
+            stats["wind_ms_max"] = float(w.max(skipna=True).values)
 
     return stats
 
@@ -689,6 +761,8 @@ def make_signal(
     source_file: str,
     details: dict,
 ) -> dict:
+    clean_details = sanitize_details(details)
+
     return {
         "timestamp": datetime.now(UTC),
         "region": region,
@@ -713,7 +787,7 @@ def make_signal(
         "forecast_start": forecast_start,
         "forecast_end": forecast_end,
         "source_file": os.path.basename(source_file),
-        "details": details,
+        "details": clean_details,
     }
 
 
@@ -841,14 +915,14 @@ def insert_signals(conn, signals: list[dict]) -> None:
                     s["best_vehicle"],
                     s["proxy_equities"],
                     s["secondary_exposures"],
-                    json.dumps(s["affected_assets_json"]),
+                    json.dumps(s["affected_assets_json"], default=str),
                     s["what_changed"],
                     s["why_it_matters"],
                     s["what_to_watch_next"],
                     s["source_file"],
                     s["forecast_start"],
                     s["forecast_end"],
-                    json.dumps(s["details"]),
+                    json.dumps(s["details"], default=str),
                 ),
             )
         conn.commit()
@@ -856,12 +930,12 @@ def insert_signals(conn, signals: list[dict]) -> None:
 
 def generate_real_shocks(conn, source_file: str) -> list[dict]:
     log(f"Opening GRIB: {source_file}")
-    ds = open_grib_dataset(source_file)
+    main_ds = open_grib_dataset(source_file)
 
     all_signals = []
     for region in REGIONS:
         try:
-            stats = extract_field_stats(ds, region)
+            stats = extract_field_stats(main_ds, region, source_file)
             signals = build_signals_from_stats(region, stats, source_file)
             all_signals.extend(signals)
         except Exception as e:
