@@ -4,6 +4,12 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
+    startCommand: bash start_dashboard.shservices:
+  - type: web
+    name: weather-dashboard
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
     startCommand: bash start_dashboard.sh
     autoDeploy: true
 
