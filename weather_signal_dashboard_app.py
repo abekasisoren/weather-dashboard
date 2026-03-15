@@ -30,12 +30,33 @@ def read_sql(query: str) -> pd.DataFrame:
 def format_dt(value) -> str:
     if value is None:
         return "-"
+
+    try:
+        if pd.isna(value):
+            return "-"
+    except Exception:
+        pass
+
     if isinstance(value, str):
-        return value
+        text = value.strip()
+        if not text or text.lower() in {"nat", "nan", "none"}:
+            return "-"
+        try:
+            parsed = pd.to_datetime(text, errors="coerce")
+            if pd.isna(parsed):
+                return text
+            return parsed.strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            return text
+
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d %H:%M UTC")
+
     try:
-        return pd.to_datetime(value).strftime("%Y-%m-%d %H:%M UTC")
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return "-"
+        return parsed.strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
         return str(value)
 
@@ -48,8 +69,11 @@ def parse_jsonish(value):
     if isinstance(value, list):
         return value
     if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
         try:
-            return json.loads(value)
+            return json.loads(text)
         except Exception:
             return value
     return value
@@ -67,8 +91,17 @@ def safe_int(value, default=0) -> int:
 def normalize_text(value, fallback="-") -> str:
     if value is None:
         return fallback
+
+    try:
+        if pd.isna(value):
+            return fallback
+    except Exception:
+        pass
+
     text = str(value).strip()
-    return text if text else fallback
+    if not text or text.lower() in {"nat", "nan", "none"}:
+        return fallback
+    return text
 
 
 def score_bucket(score: int) -> str:
@@ -84,6 +117,10 @@ def trade_label(value: str) -> str:
     if v == "bullish":
         return "Long"
     if v == "bearish":
+        return "Short"
+    if v == "long":
+        return "Long"
+    if v == "short":
         return "Short"
     return "No Trade"
 
@@ -340,17 +377,20 @@ filtered = filtered.sort_values(
 ).reset_index(drop=True)
 
 last_update = None
-if "created_at" in filtered.columns and not filtered["created_at"].isna().all():
+if "created_at" in filtered.columns and not pd.isna(filtered["created_at"]).all():
     last_update = filtered["created_at"].max()
-elif "created_at" in df.columns and not df["created_at"].isna().all():
+elif "created_at" in df.columns and not pd.isna(df["created_at"]).all():
     last_update = df["created_at"].max()
 
 top_long = "-"
 top_short = "-"
-if not filtered[filtered["trade_display"] == "Long"].empty:
-    top_long = build_title(filtered[filtered["trade_display"] == "Long"].iloc[0])
-if not filtered[filtered["trade_display"] == "Short"].empty:
-    top_short = build_title(filtered[filtered["trade_display"] == "Short"].iloc[0])
+long_df = filtered[filtered["trade_display"] == "Long"]
+short_df = filtered[filtered["trade_display"] == "Short"]
+
+if not long_df.empty:
+    top_long = build_title(long_df.iloc[0])
+if not short_df.empty:
+    top_short = build_title(short_df.iloc[0])
 
 high_count = int((filtered["signal_bucket"] == "HIGH").sum())
 
@@ -360,7 +400,7 @@ r1, r2, r3, r4 = st.columns(4)
 r1.metric("Top Long", top_long)
 r2.metric("Top Short", top_short)
 r3.metric("High Conviction", high_count)
-r4.metric("Last Update", format_dt(last_update) if last_update is not None else "-")
+r4.metric("Last Update", format_dt(last_update))
 
 st.header("🌍 Top Global Trades Right Now")
 
@@ -405,7 +445,7 @@ table_df = table_df.rename(
     }
 )
 
-table_df["Anomaly"] = table_df["Anomaly"].astype(str).str.replace("_", " ").str.title()
+table_df["Anomaly"] = table_df["Anomaly"].astype(str).str.replace("_", " ", regex=False).str.title()
 
 st.dataframe(table_df, use_container_width=True)
 
