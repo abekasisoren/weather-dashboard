@@ -5,7 +5,7 @@ import pandas as pd
 import psycopg
 import streamlit as st
 
-from weather_market_map import get_best_trade_expressions, get_event_market_map
+from weather_market_map import get_best_trade_expressions, get_event_candidates, get_event_market_map
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -99,11 +99,17 @@ def safe_float(value, default=None):
         return default
 
 
+def clamp(value: float, low: float = 0.0, high: float = 10.0) -> float:
+    return max(low, min(high, value))
+
+
 def score_bucket(score: int) -> str:
-    if score >= 8:
-        return "HIGH"
+    if score >= 9:
+        return "PRIME"
+    if score >= 7:
+        return "ACTIONABLE"
     if score >= 5:
-        return "MEDIUM"
+        return "WATCH"
     return "EARLY"
 
 
@@ -189,10 +195,12 @@ def infer_trade(row) -> str:
 
 def conviction_badge(bucket: str) -> str:
     bucket = normalize_text(bucket, "EARLY").upper()
-    if bucket == "HIGH":
-        return "<span style='background:#7f1d1d;color:#fecaca;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>HIGH</span>"
-    if bucket == "MEDIUM":
-        return "<span style='background:#78350f;color:#fde68a;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>MEDIUM</span>"
+    if bucket == "PRIME":
+        return "<span style='background:#4c1d95;color:#e9d5ff;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>PRIME</span>"
+    if bucket == "ACTIONABLE":
+        return "<span style='background:#14532d;color:#bbf7d0;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>ACTIONABLE</span>"
+    if bucket == "WATCH":
+        return "<span style='background:#78350f;color:#fde68a;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>WATCH</span>"
     if bucket == "MIXED":
         return "<span style='background:#312e81;color:#c7d2fe;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>MIXED</span>"
     return "<span style='background:#334155;color:#cbd5e1;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>EARLY</span>"
@@ -234,6 +242,15 @@ def get_vehicle(row) -> str:
         "Rice": "DBA",
     }
     return fallback.get(commodity, commodity if commodity else "-")
+
+
+def get_symbol_candidate(row, symbol: str, direction: str):
+    anomaly = normalize_anomaly_key(row.get("anomaly_type"))
+    candidates = get_event_candidates(anomaly, direction=direction.lower(), max_tier=3)
+    for candidate in candidates:
+        if candidate.get("symbol") == symbol:
+            return candidate
+    return None
 
 
 def get_stock_trade_symbols(row) -> tuple[str, list[str]]:
@@ -344,6 +361,94 @@ def build_trigger_evidence(row) -> list[str]:
     return evidence
 
 
+def compute_weather_strength(row) -> float:
+    signal = safe_int(row.get("signal_level"))
+    persistence = safe_int(row.get("persistence_score"))
+    severity = safe_int(row.get("severity_score"))
+    market = safe_int(row.get("market_score"))
+
+    base = (
+        0.40 * signal +
+        0.20 * persistence +
+        0.20 * severity +
+        0.20 * market
+    )
+    return round(clamp(base), 2)
+
+
+def compute_mapping_quality(row, symbol: str, direction: str) -> float:
+    candidate = get_symbol_candidate(row, symbol, direction)
+    if not candidate:
+        return 4.0
+
+    tier = safe_int(candidate.get("tier"), 3)
+    directness = safe_float(candidate.get("directness"), 0.35)
+
+    tier_score_map = {
+        1: 9.5,
+        2: 7.0,
+        3: 4.0,
+    }
+    tier_score = tier_score_map.get(tier, 4.0)
+    directness_score = clamp(directness * 10.0)
+
+    score = 0.60 * tier_score + 0.40 * directness_score
+    return round(clamp(score), 2)
+
+
+def compute_execution_quality(row, symbol: str) -> float:
+    vehicle = get_vehicle(row)
+    candidate = get_symbol_candidate(row, symbol, "long") or get_symbol_candidate(row, symbol, "short")
+
+    if vehicle in {"CORN", "SOYB", "WEAT", "JO", "CANE", "UNG", "USO", "XLU", "KOL", "DBA"}:
+        vehicle_score = 9.5
+    elif vehicle not in {"-", ""}:
+        vehicle_score = 8.0
+    else:
+        vehicle_score = 6.0
+
+    if candidate:
+        tier = safe_int(candidate.get("tier"), 3)
+        directness = safe_float(candidate.get("directness"), 0.35)
+        if tier == 1 and directness >= 0.85:
+            symbol_score = 9.0
+        elif tier <= 2 and directness >= 0.60:
+            symbol_score = 7.5
+        else:
+            symbol_score = 5.5
+    else:
+        symbol_score = 6.0
+
+    return round(clamp(0.50 * vehicle_score + 0.50 * symbol_score), 2)
+
+
+def compute_conflict_cleanliness(long_score: int, short_score: int) -> float:
+    if long_score > 0 and short_score == 0:
+        return 10.0
+    if short_score > 0 and long_score == 0:
+        return 10.0
+    if long_score == 0 and short_score == 0:
+        return 0.0
+
+    gross = long_score + short_score
+    if gross <= 0:
+        return 0.0
+
+    dominance = abs(long_score - short_score) / gross
+    score = dominance * 10.0
+    return round(clamp(score), 2)
+
+
+def compute_final_trade_score(weather_strength: float, mapping_quality: float, conflict_cleanliness: float, execution_quality: float) -> float:
+    score = (
+        0.45 * weather_strength +
+        0.25 * mapping_quality +
+        0.20 * conflict_cleanliness +
+        0.10 * execution_quality
+    )
+    return round(clamp(score), 2)
+
+
 def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
     raw_rows = []
 
@@ -353,9 +458,12 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
             continue
 
         signal = safe_int(row.get("signal_level"))
-        signal_bucket = normalize_text(row.get("signal_bucket"), score_bucket(signal))
+        weather_strength = compute_weather_strength(row)
 
         for symbol in symbols:
+            mapping_quality = compute_mapping_quality(row, symbol, trade)
+            execution_quality = compute_execution_quality(row, symbol)
+
             raw_rows.append(
                 {
                     "Date": format_date_only(
@@ -363,14 +471,16 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
                     ),
                     "Symbol": symbol,
                     "Trade": trade,
-                    "Signal": signal,
+                    "Raw Signal": signal,
+                    "Weather Strength": weather_strength,
+                    "Mapping Quality": mapping_quality,
+                    "Execution Quality": execution_quality,
                     "Why": get_why_it_matters(row),
                     "Region": normalize_text(row.get("region")),
                     "Commodity": normalize_text(row.get("commodity")),
                     "Anomaly": normalize_text(row.get("anomaly_type")).replace("_", " ").title(),
                     "Vehicle": get_vehicle(row),
                     "Commodity Trade": get_commodity_trade(row),
-                    "Conviction": signal_bucket,
                 }
             )
 
@@ -384,9 +494,10 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
         long_group = group[group["Trade"] == "Long"]
         short_group = group[group["Trade"] == "Short"]
 
-        long_score = int(long_group["Signal"].sum()) if not long_group.empty else 0
-        short_score = int(short_group["Signal"].sum()) if not short_group.empty else 0
+        long_score = int(long_group["Raw Signal"].sum()) if not long_group.empty else 0
+        short_score = int(short_group["Raw Signal"].sum()) if not short_group.empty else 0
         net_score = long_score - short_score
+        cleanliness = compute_conflict_cleanliness(long_score, short_score)
 
         if long_score == 0 and short_score == 0:
             continue
@@ -394,34 +505,37 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
         if net_score >= 3 and not long_group.empty:
             final_trade = "Long"
             winner = long_group.sort_values(
-                by=["Signal", "Date", "Region", "Commodity"],
-                ascending=[False, False, True, True],
+                by=["Weather Strength", "Mapping Quality", "Execution Quality", "Raw Signal"],
+                ascending=[False, False, False, False],
             ).iloc[0]
-            display_signal = long_score
-            conviction = score_bucket(display_signal)
+            mapping_quality = float(winner["Mapping Quality"])
+            execution_quality = float(winner["Execution Quality"])
+            weather_strength = float(winner["Weather Strength"])
             why = winner["Why"]
 
         elif net_score <= -3 and not short_group.empty:
             final_trade = "Short"
             winner = short_group.sort_values(
-                by=["Signal", "Date", "Region", "Commodity"],
-                ascending=[False, False, True, True],
+                by=["Weather Strength", "Mapping Quality", "Execution Quality", "Raw Signal"],
+                ascending=[False, False, False, False],
             ).iloc[0]
-            display_signal = short_score
-            conviction = score_bucket(display_signal)
+            mapping_quality = float(winner["Mapping Quality"])
+            execution_quality = float(winner["Execution Quality"])
+            weather_strength = float(winner["Weather Strength"])
             why = winner["Why"]
 
         else:
             winner = group.sort_values(
-                by=["Signal", "Date", "Region", "Commodity"],
-                ascending=[False, False, True, True],
+                by=["Weather Strength", "Mapping Quality", "Execution Quality", "Raw Signal"],
+                ascending=[False, False, False, False],
             ).iloc[0]
             final_trade = "No Trade"
-            display_signal = max(long_score, short_score)
-            conviction = "MIXED"
+            mapping_quality = float(winner["Mapping Quality"])
+            execution_quality = float(winner["Execution Quality"])
+            weather_strength = float(winner["Weather Strength"])
 
-            long_reason = long_group.sort_values("Signal", ascending=False).iloc[0]["Why"] if not long_group.empty else ""
-            short_reason = short_group.sort_values("Signal", ascending=False).iloc[0]["Why"] if not short_group.empty else ""
+            long_reason = long_group.sort_values("Raw Signal", ascending=False).iloc[0]["Why"] if not long_group.empty else ""
+            short_reason = short_group.sort_values("Raw Signal", ascending=False).iloc[0]["Why"] if not short_group.empty else ""
 
             if long_reason and short_reason:
                 why = f"Conflicting weather signals. Bullish case: {long_reason} Bearish case: {short_reason}"
@@ -431,6 +545,15 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
                 why = f"Conflicting setup, but bearish signals are present: {short_reason}"
             else:
                 why = "Conflicting weather signals."
+
+        final_trade_score = compute_final_trade_score(
+            weather_strength=weather_strength,
+            mapping_quality=mapping_quality,
+            conflict_cleanliness=cleanliness,
+            execution_quality=execution_quality,
+        )
+
+        conviction = "MIXED" if final_trade == "No Trade" else score_bucket(int(round(final_trade_score)))
 
         final_rows.append(
             {
@@ -443,8 +566,14 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
                 "Anomaly": winner["Anomaly"],
                 "Vehicle": winner["Vehicle"],
                 "Commodity Trade": winner["Commodity Trade"],
-                "Signal": display_signal,
+                "Signal": int(round(final_trade_score)),
                 "Conviction": conviction,
+                "Weather Strength": round(weather_strength, 2),
+                "Mapping Quality": round(mapping_quality, 2),
+                "Conflict Cleanliness": round(cleanliness, 2),
+                "Execution Quality": round(execution_quality, 2),
+                "Long Raw": long_score,
+                "Short Raw": short_score,
             }
         )
 
@@ -461,11 +590,92 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
     return pulse_df
 
 
+def build_ranked_trade_table(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+
+    for _, row in df.iterrows():
+        trade, symbols = get_stock_trade_symbols(row)
+        if not symbols:
+            rows.append(
+                {
+                    "Region": normalize_text(row.get("region")),
+                    "Commodity": normalize_text(row.get("commodity")),
+                    "Anomaly": normalize_text(row.get("anomaly_type")).replace("_", " ").title(),
+                    "Trade": infer_trade(row),
+                    "Conviction": normalize_text(row.get("signal_bucket"), score_bucket(safe_int(row.get("signal_level")))),
+                    "Signal": safe_int(row.get("signal_level")),
+                    "Persistence": safe_int(row.get("persistence_score")),
+                    "Market": safe_int(row.get("market_score")),
+                    "Severity": safe_int(row.get("severity_score")),
+                    "Commodity Trade": get_commodity_trade(row),
+                    "Stock Trade": "-",
+                    "Vehicle": get_vehicle(row),
+                    "Weather Strength": compute_weather_strength(row),
+                    "Mapping Quality": 0.0,
+                    "Execution Quality": 0.0,
+                    "Final Trade Score": compute_weather_strength(row),
+                }
+            )
+            continue
+
+        best_symbol = symbols[0]
+        weather_strength = compute_weather_strength(row)
+        mapping_quality = compute_mapping_quality(row, best_symbol, trade)
+        execution_quality = compute_execution_quality(row, best_symbol)
+        final_trade_score = compute_final_trade_score(
+            weather_strength=weather_strength,
+            mapping_quality=mapping_quality,
+            conflict_cleanliness=10.0,
+            execution_quality=execution_quality,
+        )
+
+        rows.append(
+            {
+                "Region": normalize_text(row.get("region")),
+                "Commodity": normalize_text(row.get("commodity")),
+                "Anomaly": normalize_text(row.get("anomaly_type")).replace("_", " ").title(),
+                "Trade": trade,
+                "Conviction": score_bucket(int(round(final_trade_score))),
+                "Signal": int(round(final_trade_score)),
+                "Persistence": safe_int(row.get("persistence_score")),
+                "Market": safe_int(row.get("market_score")),
+                "Severity": safe_int(row.get("severity_score")),
+                "Commodity Trade": get_commodity_trade(row),
+                "Stock Trade": get_stock_trade(row),
+                "Vehicle": get_vehicle(row),
+                "Weather Strength": round(weather_strength, 2),
+                "Mapping Quality": round(mapping_quality, 2),
+                "Execution Quality": round(execution_quality, 2),
+                "Final Trade Score": round(final_trade_score, 2),
+            }
+        )
+
+    ranked_df = pd.DataFrame(rows)
+    ranked_df = ranked_df.sort_values(
+        by=["Final Trade Score", "Signal", "Region", "Commodity"],
+        ascending=[False, False, True, True],
+    ).reset_index(drop=True)
+
+    return ranked_df
+
+
 def show_trade_card(row, rank_number=None):
     title = build_title(row)
     prefix = f"#{rank_number} " if rank_number is not None else ""
     trade = infer_trade(row)
-    bucket = normalize_text(row.get("signal_bucket"), score_bucket(safe_int(row.get("signal_level"))))
+
+    trade, symbols = get_stock_trade_symbols(row)
+    best_symbol = symbols[0] if symbols else ""
+    weather_strength = compute_weather_strength(row)
+    mapping_quality = compute_mapping_quality(row, best_symbol, trade) if best_symbol else 0.0
+    execution_quality = compute_execution_quality(row, best_symbol) if best_symbol else 0.0
+    final_trade_score = compute_final_trade_score(
+        weather_strength=weather_strength,
+        mapping_quality=mapping_quality,
+        conflict_cleanliness=10.0,
+        execution_quality=execution_quality,
+    )
+    bucket = score_bucket(int(round(final_trade_score)))
 
     st.markdown(f"### {prefix}{title}")
 
@@ -479,6 +689,10 @@ def show_trade_card(row, rank_number=None):
     st.markdown(f"**Stock Trade:** {get_stock_trade(row)}")
     st.markdown(f"**Vehicle:** {get_vehicle(row)}")
     st.markdown(f"**Why this matters:** {get_why_it_matters(row)}")
+    st.markdown(f"**Final Trade Score:** {round(final_trade_score, 2)} / 10")
+    st.markdown(f"**Weather Strength:** {round(weather_strength, 2)}")
+    st.markdown(f"**Mapping Quality:** {round(mapping_quality, 2)}")
+    st.markdown(f"**Execution Quality:** {round(execution_quality, 2)}")
     st.markdown(f"**Assets:** {get_assets_summary(row)}")
     st.markdown(f"**Forecast Window:** {format_dt(row.get('forecast_start'))} → {format_dt(row.get('forecast_end'))}")
 
@@ -492,6 +706,12 @@ def show_trade_card(row, rank_number=None):
 
         st.markdown("**Stock recommendation**")
         st.write(get_stock_trade(row))
+
+        st.markdown("**Scoring breakdown**")
+        st.write(f"Weather Strength: {round(weather_strength, 2)}")
+        st.write(f"Mapping Quality: {round(mapping_quality, 2)}")
+        st.write(f"Execution Quality: {round(execution_quality, 2)}")
+        st.write(f"Final Trade Score: {round(final_trade_score, 2)}")
 
         st.markdown("**Weather details**")
         details = parse_jsonish(row.get("details"))
@@ -544,13 +764,13 @@ for col in ["signal_level", "persistence_score", "severity_score", "market_score
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-df["signal_bucket"] = df["signal_bucket"].fillna(df["signal_level"].apply(score_bucket))
+df["weather_strength"] = df.apply(compute_weather_strength, axis=1)
 df["trade_display"] = df.apply(infer_trade, axis=1)
 
 df = (
     df.sort_values(
-        by=["signal_level", "persistence_score", "market_score", "severity_score", "created_at"],
-        ascending=[False, False, False, False, False],
+        by=["weather_strength", "signal_level", "persistence_score", "market_score", "severity_score", "created_at"],
+        ascending=[False, False, False, False, False, False],
     )
     .drop_duplicates(subset=["region", "commodity", "anomaly_type"], keep="first")
     .reset_index(drop=True)
@@ -558,7 +778,7 @@ df = (
 
 st.sidebar.header("Filters")
 
-bucket_options = ["HIGH", "MEDIUM", "EARLY"]
+bucket_options = ["PRIME", "ACTIONABLE", "WATCH", "EARLY"]
 selected_buckets = st.sidebar.multiselect("Conviction", bucket_options, default=bucket_options)
 
 trade_options = ["Long", "Short", "No Trade"]
@@ -570,36 +790,43 @@ selected_regions = st.sidebar.multiselect("Region", region_options, default=regi
 commodity_options = sorted(df["commodity"].dropna().astype(str).unique().tolist())
 selected_commodities = st.sidebar.multiselect("Commodity", commodity_options, default=commodity_options)
 
-min_signal = st.sidebar.slider("Minimum Signal", min_value=1, max_value=10, value=1)
+min_signal = st.sidebar.slider("Minimum Weather Strength", min_value=1, max_value=10, value=1)
 top_n = st.sidebar.slider("Top Trades to Show", min_value=3, max_value=50, value=20)
 
+ranked_preview = build_ranked_trade_table(df)
+valid_bucket_keys = set(selected_buckets)
+
 filtered = df[
-    df["signal_bucket"].isin(selected_buckets)
-    & df["trade_display"].isin(selected_trades)
+    df["trade_display"].isin(selected_trades)
     & df["region"].astype(str).isin(selected_regions)
     & df["commodity"].astype(str).isin(selected_commodities)
-    & (df["signal_level"] >= min_signal)
+    & (df["weather_strength"] >= min_signal)
 ].copy()
 
-filtered = filtered.sort_values(
-    by=["signal_level", "persistence_score", "market_score", "severity_score", "created_at"],
-    ascending=[False, False, False, False, False],
-).reset_index(drop=True)
+filtered_ranked = build_ranked_trade_table(filtered)
+filtered_ranked = filtered_ranked[filtered_ranked["Conviction"].isin(valid_bucket_keys)].copy()
 
 last_update = filtered["created_at"].max() if "created_at" in filtered.columns and not filtered.empty else None
 
-long_df = filtered[filtered["trade_display"] == "Long"]
-short_df = filtered[filtered["trade_display"] == "Short"]
+long_ranked = filtered_ranked[filtered_ranked["Trade"] == "Long"]
+short_ranked = filtered_ranked[filtered_ranked["Trade"] == "Short"]
 
-top_long = build_title(long_df.iloc[0]) if not long_df.empty else "-"
-top_short = build_title(short_df.iloc[0]) if not short_df.empty else "-"
-high_count = int((filtered["signal_bucket"] == "HIGH").sum())
+top_long = (
+    f"{long_ranked.iloc[0]['Region']} — {long_ranked.iloc[0]['Anomaly']} — {long_ranked.iloc[0]['Commodity']}"
+    if not long_ranked.empty else "-"
+)
+top_short = (
+    f"{short_ranked.iloc[0]['Region']} — {short_ranked.iloc[0]['Anomaly']} — {short_ranked.iloc[0]['Commodity']}"
+    if not short_ranked.empty else "-"
+)
+
+prime_count = int((filtered_ranked["Conviction"] == "PRIME").sum())
 
 st.header("📡 Market Radar")
 r1, r2, r3, r4 = st.columns(4)
 r1.metric("Top Long", top_long)
 r2.metric("Top Short", top_short)
-r3.metric("High Conviction", high_count)
+r3.metric("Prime Trades", prime_count)
 r4.metric("Last Update", format_dt(last_update))
 
 st.header("🌍 Top Global Trades Right Now")
@@ -607,56 +834,56 @@ st.header("🌍 Top Global Trades Right Now")
 if filtered.empty:
     st.write("No trades match the current filters.")
 else:
-    top_df = filtered.head(top_n).copy()
+    top_df = filtered.copy()
+    top_df["preview_score"] = top_df.apply(
+        lambda row: compute_final_trade_score(
+            compute_weather_strength(row),
+            compute_mapping_quality(row, get_stock_trade_symbols(row)[1][0], infer_trade(row)) if get_stock_trade_symbols(row)[1] else 0.0,
+            10.0,
+            compute_execution_quality(row, get_stock_trade_symbols(row)[1][0]) if get_stock_trade_symbols(row)[1] else 0.0,
+        ),
+        axis=1,
+    )
+    top_df = top_df.sort_values(by=["preview_score", "weather_strength", "created_at"], ascending=[False, False, False]).head(top_n)
+
     for idx, (_, row) in enumerate(top_df.iterrows(), start=1):
         show_trade_card(row, rank_number=idx)
 
 st.header("📊 Ranking Table")
 
-table_df = filtered[
+ranking_table = filtered_ranked[
     [
-        "region",
-        "commodity",
-        "anomaly_type",
-        "trade_display",
-        "signal_bucket",
-        "signal_level",
-        "persistence_score",
-        "market_score",
-        "severity_score",
+        "Region",
+        "Commodity",
+        "Anomaly",
+        "Trade",
+        "Conviction",
+        "Signal",
+        "Persistence",
+        "Market",
+        "Severity",
+        "Commodity Trade",
+        "Stock Trade",
+        "Vehicle",
+        "Weather Strength",
+        "Mapping Quality",
+        "Execution Quality",
+        "Final Trade Score",
     ]
 ].copy()
 
-table_df["Commodity Trade"] = filtered.apply(get_commodity_trade, axis=1)
-table_df["Stock Trade"] = filtered.apply(get_stock_trade, axis=1)
-table_df["Vehicle"] = filtered.apply(get_vehicle, axis=1)
-
-table_df = table_df.rename(
-    columns={
-        "region": "Region",
-        "commodity": "Commodity",
-        "anomaly_type": "Anomaly",
-        "trade_display": "Trade",
-        "signal_bucket": "Conviction",
-        "signal_level": "Signal",
-        "persistence_score": "Persistence",
-        "market_score": "Market",
-        "severity_score": "Severity",
-    }
-)
-
-table_df["Anomaly"] = table_df["Anomaly"].astype(str).str.replace("_", " ", regex=False).str.title()
-
-st.dataframe(table_df, use_container_width=True)
+st.dataframe(ranking_table, use_container_width=True)
 
 st.header("🌐 Global Pulse Trader")
 
-pulse_source = filtered[filtered["signal_level"] == 10].copy()
+pulse_source = filtered.copy()
 pulse_table = build_global_pulse_trader_table(pulse_source)
 
 if pulse_table.empty:
-    st.write("No 10-score recommendations right now.")
+    st.write("No high-quality recommendations right now.")
 else:
+    pulse_table = pulse_table[pulse_table["Signal"] >= 7].copy()
+    pulse_table = pulse_table[pulse_table["Trade"] != "No Trade"].copy()
     st.dataframe(pulse_table, use_container_width=True)
 
 with st.expander("Raw filtered table"):
