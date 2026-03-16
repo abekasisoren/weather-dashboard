@@ -191,52 +191,52 @@ RULES = {
 
 ASSET_MAP = {
     "Corn": {
-        "best_vehicle": "Corn futures / CORN ETF",
+        "best_vehicle": "CORN",
         "proxy_equities": ["ADM", "BG", "CF", "MOS", "CTVA", "DE", "UNP"],
         "secondary_exposures": ["ethanol", "grain handlers", "rail logistics", "crop insurers", "farm equipment"],
     },
     "Soybeans": {
-        "best_vehicle": "Soybean futures / SOYB ETF",
+        "best_vehicle": "SOYB",
         "proxy_equities": ["ADM", "BG", "CF", "MOS", "CTVA", "DE"],
         "secondary_exposures": ["soy processors", "export terminals", "fertilizer", "farm equipment"],
     },
     "Wheat": {
-        "best_vehicle": "Wheat futures / WEAT ETF",
+        "best_vehicle": "WEAT",
         "proxy_equities": ["ADM", "BG", "MOS", "CF", "DE"],
         "secondary_exposures": ["grain traders", "fertilizer", "farm equipment", "food inflation"],
     },
     "Coffee": {
-        "best_vehicle": "Coffee futures / JO ETF",
+        "best_vehicle": "JO",
         "proxy_equities": ["SBUX", "NSRGY"],
         "secondary_exposures": ["coffee roasters", "packaged beverages", "soft commodities"],
     },
     "Sugar": {
-        "best_vehicle": "Sugar futures / CANE ETF",
+        "best_vehicle": "CANE",
         "proxy_equities": ["CZZ", "TRRJF"],
         "secondary_exposures": ["ethanol-linked producers", "food input costs", "soft commodities"],
     },
     "Natural Gas": {
-        "best_vehicle": "Natural gas futures / UNG ETF",
-        "proxy_equities": ["EQT", "CTRA", "RRC", "LNG"],
+        "best_vehicle": "UNG",
+        "proxy_equities": ["EQT", "LNG", "CTRA", "RRC"],
         "secondary_exposures": ["LNG exporters", "utilities", "power generation", "industrial demand"],
     },
     "Power Utilities": {
-        "best_vehicle": "European utilities basket",
-        "proxy_equities": ["NGG", "IBE.MC", "EOAN.DE", "ENGIY"],
+        "best_vehicle": "XLU",
+        "proxy_equities": ["NEE", "DUK", "SO", "AEP"],
         "secondary_exposures": ["power generators", "grid operators", "gas-sensitive industrials"],
     },
     "Rice": {
-        "best_vehicle": "Rice futures / agri proxies",
+        "best_vehicle": "DBA",
         "proxy_equities": ["ADM", "BG"],
         "secondary_exposures": ["food staples", "Asian agri merchants", "supply-chain logistics"],
     },
     "Coal": {
-        "best_vehicle": "Coal producers basket",
+        "best_vehicle": "KOL",
         "proxy_equities": ["BTU", "ARCH", "AMR"],
         "secondary_exposures": ["bulk shipping", "power generation", "rail freight"],
     },
     "Oil": {
-        "best_vehicle": "Crude oil futures / USO ETF",
+        "best_vehicle": "USO",
         "proxy_equities": ["XOM", "CVX", "COP"],
         "secondary_exposures": ["refiners", "offshore services", "tankers"],
     },
@@ -425,7 +425,7 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
     if tp_name:
         tp = trim_forecast_horizon(subset_region(ds_tp[tp_name], region))
         precip_mm = tp * 1000.0
-        stats["precip_mm_7d"] = float(precip_mm.sum(skipna=True).values)
+        stats["precip_mm_7d"] = float(precip_mm.max(skipna=True).values)
 
         if stats["forecast_start"] is None:
             if "valid_time" in tp.coords:
@@ -448,8 +448,12 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
     else:
         ds_u = None
         ds_v = None
+
         if u10_name is None:
-            fallback_u = open_grib_dataset_filtered(source_file, {"shortName": "10u", "typeOfLevel": "heightAboveGround", "level": 10})
+            fallback_u = open_grib_dataset_filtered(
+                source_file,
+                {"shortName": "10u", "typeOfLevel": "heightAboveGround", "level": 10},
+            )
             if fallback_u is not None:
                 ds_u = normalize_longitudes(fallback_u)
                 u10_name = get_var_name(ds_u, ["u10", "10u"])
@@ -457,7 +461,10 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
             ds_u = ds_wind
 
         if v10_name is None:
-            fallback_v = open_grib_dataset_filtered(source_file, {"shortName": "10v", "typeOfLevel": "heightAboveGround", "level": 10})
+            fallback_v = open_grib_dataset_filtered(
+                source_file,
+                {"shortName": "10v", "typeOfLevel": "heightAboveGround", "level": 10},
+            )
             if fallback_v is not None:
                 ds_v = normalize_longitudes(fallback_v)
                 v10_name = get_var_name(ds_v, ["v10", "10v"])
@@ -642,11 +649,7 @@ def score_bucket(score: int) -> str:
 def build_asset_payload(commodity: str, trade_bias: str) -> dict:
     base = ASSET_MAP.get(
         commodity,
-        {
-            "best_vehicle": commodity,
-            "proxy_equities": [],
-            "secondary_exposures": [],
-        },
+        {"best_vehicle": commodity, "proxy_equities": [], "secondary_exposures": []},
     )
 
     affected_assets = []
