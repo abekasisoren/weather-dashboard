@@ -42,6 +42,14 @@ REGIONS = [
         "commodities": ["Soybeans", "Coffee", "Sugar"],
     },
     {
+        "name": "Mato Grosso",
+        "lat_min": -17.0,
+        "lat_max": -8.0,
+        "lon_min": -60.0,
+        "lon_max": -52.0,
+        "commodities": ["Corn", "Soybeans"],
+    },
+    {
         "name": "Argentina Pampas",
         "lat_min": -40.0,
         "lat_max": -28.0,
@@ -105,6 +113,79 @@ REGIONS = [
         "lon_max": -114.0,
         "commodities": ["Power Utilities"],
     },
+    # --- New regions ---
+    {
+        "name": "West Africa Cocoa Belt",
+        "lat_min": 3.0,
+        "lat_max": 10.0,
+        "lon_min": -8.0,
+        "lon_max": 2.0,
+        "commodities": ["Cocoa", "Palm Oil"],
+    },
+    {
+        "name": "Southeast Asia",
+        "lat_min": 0.0,
+        "lat_max": 15.0,
+        "lon_min": 98.0,
+        "lon_max": 120.0,
+        "commodities": ["Palm Oil", "Rice"],
+    },
+    {
+        "name": "Canadian Prairies",
+        "lat_min": 48.0,
+        "lat_max": 55.0,
+        "lon_min": -115.0,
+        "lon_max": -100.0,
+        "commodities": ["Wheat", "Canola"],
+    },
+    {
+        "name": "Middle East Gulf",
+        "lat_min": 22.0,
+        "lat_max": 30.0,
+        "lon_min": 45.0,
+        "lon_max": 60.0,
+        "commodities": ["Oil", "LNG"],
+    },
+    {
+        "name": "North Sea",
+        "lat_min": 53.0,
+        "lat_max": 62.0,
+        "lon_min": 0.0,
+        "lon_max": 8.0,
+        "commodities": ["Natural Gas", "Oil"],
+    },
+    {
+        "name": "East Africa",
+        "lat_min": 0.0,
+        "lat_max": 10.0,
+        "lon_min": 35.0,
+        "lon_max": 42.0,
+        "commodities": ["Coffee"],
+    },
+    {
+        "name": "US Pacific Northwest",
+        "lat_min": 44.0,
+        "lat_max": 49.0,
+        "lon_min": -124.0,
+        "lon_max": -120.0,
+        "commodities": ["Power Utilities"],
+    },
+    {
+        "name": "China Yangtze Basin",
+        "lat_min": 28.0,
+        "lat_max": 34.0,
+        "lon_min": 108.0,
+        "lon_max": 122.0,
+        "commodities": ["Soybeans", "Rice"],
+    },
+    {
+        "name": "Southern Europe",
+        "lat_min": 35.0,
+        "lat_max": 45.0,
+        "lon_min": 5.0,
+        "lon_max": 25.0,
+        "commodities": ["Wheat", "Olive Oil"],
+    },
 ]
 
 MARKET_SENSITIVITY = {
@@ -118,6 +199,12 @@ MARKET_SENSITIVITY = {
     "Rice": 3,
     "Coal": 3,
     "Oil": 5,
+    # New commodities
+    "Cocoa": 5,
+    "Palm Oil": 4,
+    "Canola": 4,
+    "LNG": 5,
+    "Olive Oil": 3,
 }
 
 RULES = {
@@ -187,6 +274,44 @@ RULES = {
         "base_score": 5,
         "bullish_for": {"Oil", "Natural Gas", "Power Utilities"},
     },
+    # --- New anomaly types ---
+    "polar_vortex": {
+        "temp_c_min": -15.0,
+        "severity_step_c": 3.0,
+        "base_score": 5,
+        "bullish_for": {"Natural Gas", "Power Utilities", "LNG", "Coal"},
+        "bearish_for": set(),
+    },
+    "atmospheric_river": {
+        "precip_mm_7d": 200.0,
+        "severity_step_mm": 40.0,
+        "base_score": 4,
+        "bullish_for": {"Power Utilities"},
+        "bearish_for": {"Wheat", "Corn", "Soybeans", "Coffee", "Sugar"},
+    },
+    "monsoon_failure": {
+        # Triggered in build_signals_from_stats with date-aware logic
+        "precip_mm_7d_max": 5.0,
+        "severity_step_mm": 2.0,
+        "base_score": 5,
+        "bullish_for": {"Rice", "Sugar", "Palm Oil", "Coffee"},
+        "bearish_for": set(),
+    },
+    "ice_storm": {
+        # temp between -2 and +2°C AND precip >= 50mm — freezing rain proxy
+        "precip_mm_7d": 50.0,
+        "severity_step_mm": 15.0,
+        "base_score": 4,
+        "bullish_for": {"Natural Gas", "Power Utilities", "LNG"},
+        "bearish_for": set(),
+    },
+    "extreme_wind": {
+        "wind_ms_max": 30.0,
+        "severity_step_ms": 5.0,
+        "base_score": 4,
+        "bullish_for": {"Oil", "Natural Gas", "LNG"},
+        "bearish_for": set(),
+    },
 }
 
 ASSET_MAP = {
@@ -240,6 +365,32 @@ ASSET_MAP = {
         "proxy_equities": ["XOM", "CVX", "COP"],
         "secondary_exposures": ["refiners", "offshore services", "tankers"],
     },
+    # New commodities
+    "Cocoa": {
+        "best_vehicle": "NIB",
+        "proxy_equities": ["MDLZ", "HSY", "ADM"],
+        "secondary_exposures": ["chocolate confectionery", "food manufacturers", "soft commodities"],
+    },
+    "Palm Oil": {
+        "best_vehicle": "DBA",
+        "proxy_equities": ["ADM", "BG"],
+        "secondary_exposures": ["food manufacturers", "biodiesel", "Asian agri merchants"],
+    },
+    "Canola": {
+        "best_vehicle": "MOO",
+        "proxy_equities": ["NTR", "ADM", "BG"],
+        "secondary_exposures": ["oilseed processors", "vegetable oil", "Canadian agribusiness"],
+    },
+    "LNG": {
+        "best_vehicle": "UNG",
+        "proxy_equities": ["LNG", "EQNR", "SHEL", "BP"],
+        "secondary_exposures": ["LNG exporters", "regasification terminals", "gas utilities"],
+    },
+    "Olive Oil": {
+        "best_vehicle": "DBA",
+        "proxy_equities": ["ADM", "GIS"],
+        "secondary_exposures": ["food manufacturers", "Mediterranean agriculture", "specialty foods"],
+    },
 }
 
 
@@ -281,6 +432,16 @@ def ensure_schema(conn) -> None:
             );
             """
         )
+        # Add new columns if they don't exist (idempotent migrations)
+        migrations = [
+            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS trend_direction TEXT DEFAULT 'new'",
+            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_validated BOOLEAN DEFAULT NULL",
+            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_source TEXT DEFAULT NULL",
+            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_headline TEXT DEFAULT NULL",
+            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_score FLOAT DEFAULT NULL",
+        ]
+        for migration in migrations:
+            cur.execute(migration)
         conn.commit()
 
 
@@ -528,7 +689,7 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
 def severity_from_excess(excess: float, step: float, base: int) -> int:
     if excess <= 0:
         return 0
-    return min(5, max(base, base + int(math.floor(excess / step))))
+    return min(10, max(base, base + int(math.floor(excess / step))))
 
 
 def classify_trade_bias(anomaly_type: str, commodity: str) -> str:
@@ -550,6 +711,11 @@ def normalize_event_key(anomaly_type: str) -> str:
         "wildfire_risk": "wildfire",
         "cold_wave": "cold_wave",
         "hurricane_risk": "hurricane",
+        "polar_vortex": "cold_wave",
+        "atmospheric_river": "flood",
+        "monsoon_failure": "drought",
+        "ice_storm": "cold_wave",
+        "extreme_wind": "storm_wind",
     }
     return mapping.get(anomaly_type, anomaly_type)
 
@@ -583,7 +749,7 @@ def make_signal(
         "anomaly_value": float(anomaly_value),
         "severity_score": int(severity_score),
         "market_score": int(market_score),
-        "persistence_score": 1,
+        "persistence_score": 0,
         "signal_level": 1,
         "signal_bucket": "EARLY SIGNAL",
         "trade_bias": trade_bias,
@@ -600,6 +766,7 @@ def make_signal(
         "forecast_end": forecast_end,
         "source_file": os.path.basename(source_file),
         "details": sanitize_details(details),
+        "trend_direction": "new",  # enriched later
     }
 
 
@@ -679,6 +846,50 @@ def build_signals_from_stats(region: dict, stats: dict, source_file: str) -> lis
             excess = wind_ms_max - RULES["hurricane_risk"]["wind_ms_max"]
             severity = severity_from_excess(excess, RULES["hurricane_risk"]["severity_step_ms"], RULES["hurricane_risk"]["base_score"])
             signals.append(make_signal(region["name"], commodity, "hurricane_risk", wind_ms_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("hurricane_risk", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        # --- New anomaly types ---
+
+        # polar_vortex: temp_min <= -15°C
+        if temp_c_min is not None and temp_c_min <= RULES["polar_vortex"]["temp_c_min"]:
+            excess = RULES["polar_vortex"]["temp_c_min"] - temp_c_min
+            severity = severity_from_excess(excess, RULES["polar_vortex"]["severity_step_c"], RULES["polar_vortex"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "polar_vortex", temp_c_min, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("polar_vortex", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        # atmospheric_river: precip >= 200mm/7d
+        if precip_mm_7d is not None and precip_mm_7d >= RULES["atmospheric_river"]["precip_mm_7d"]:
+            excess = precip_mm_7d - RULES["atmospheric_river"]["precip_mm_7d"]
+            severity = severity_from_excess(excess, RULES["atmospheric_river"]["severity_step_mm"], RULES["atmospheric_river"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "atmospheric_river", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("atmospheric_river", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        # monsoon_failure: precip <= 5mm in peak monsoon months (Jun-Sep) for India/SE Asia/East Africa
+        monsoon_regions = {"India", "Southeast Asia", "East Africa", "West Africa Cocoa Belt"}
+        current_month = datetime.now(UTC).month
+        if (
+            region["name"] in monsoon_regions
+            and current_month in {6, 7, 8, 9}
+            and precip_mm_7d is not None
+            and precip_mm_7d <= RULES["monsoon_failure"]["precip_mm_7d_max"]
+        ):
+            excess = RULES["monsoon_failure"]["precip_mm_7d_max"] - precip_mm_7d
+            severity = severity_from_excess(excess, RULES["monsoon_failure"]["severity_step_mm"], RULES["monsoon_failure"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "monsoon_failure", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("monsoon_failure", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        # ice_storm: temp between -2°C and +2°C AND precip >= 50mm — freezing rain proxy
+        if (
+            temp_c_mean is not None
+            and precip_mm_7d is not None
+            and -2.0 <= temp_c_mean <= 2.0
+            and precip_mm_7d >= RULES["ice_storm"]["precip_mm_7d"]
+        ):
+            excess = precip_mm_7d - RULES["ice_storm"]["precip_mm_7d"]
+            severity = severity_from_excess(excess, RULES["ice_storm"]["severity_step_mm"], RULES["ice_storm"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "ice_storm", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("ice_storm", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+
+        # extreme_wind: wind >= 30 m/s (higher tier than storm_wind)
+        if wind_ms_max is not None and wind_ms_max >= RULES["extreme_wind"]["wind_ms_max"]:
+            excess = wind_ms_max - RULES["extreme_wind"]["wind_ms_max"]
+            severity = severity_from_excess(excess, RULES["extreme_wind"]["severity_step_ms"], RULES["extreme_wind"]["base_score"])
+            signals.append(make_signal(region["name"], commodity, "extreme_wind", wind_ms_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("extreme_wind", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
 
     return signals
 
@@ -763,6 +974,7 @@ def enrich_persistence_and_signal(conn, signals: list[dict]) -> list[dict]:
 
     with conn.cursor() as cur:
         for s in signals:
+            # Extended persistence window: 7 days
             cur.execute(
                 """
                 SELECT COUNT(*)
@@ -770,22 +982,56 @@ def enrich_persistence_and_signal(conn, signals: list[dict]) -> list[dict]:
                 WHERE region = %s
                   AND commodity = %s
                   AND anomaly_type = %s
-                  AND timestamp >= NOW() - INTERVAL '3 days'
+                  AND timestamp >= NOW() - INTERVAL '7 days'
                 """,
                 (s["region"], s["commodity"], s["anomaly_type"]),
             )
             prior_hits = cur.fetchone()[0]
 
-            if prior_hits >= 3:
+            if prior_hits >= 5:
                 persistence = 5
-            elif prior_hits == 2:
+            elif prior_hits >= 4:
                 persistence = 4
-            elif prior_hits == 1:
+            elif prior_hits >= 3:
                 persistence = 3
-            else:
+            elif prior_hits >= 2:
+                persistence = 2
+            elif prior_hits >= 1:
                 persistence = 1
+            else:
+                persistence = 0  # No prior — new signal, not inflated
 
             s["persistence_score"] = persistence
+
+            # Compute trend direction by comparing to most recent prior signal level
+            cur.execute(
+                """
+                SELECT signal_level
+                FROM weather_global_shocks
+                WHERE region = %s
+                  AND commodity = %s
+                  AND anomaly_type = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (s["region"], s["commodity"], s["anomaly_type"]),
+            )
+            prev_row = cur.fetchone()
+            if prev_row is None:
+                trend_direction = "new"
+            else:
+                prev_level = prev_row[0] or 0
+                # Compute current signal level preview (without persistence bias)
+                raw_preview = (s["severity_score"] * 0.45) + (persistence * 0.35) + (s["market_score"] * 0.20)
+                current_level_preview = int(round(raw_preview * 2))
+                if current_level_preview > prev_level + 1:
+                    trend_direction = "worsening"
+                elif current_level_preview < prev_level - 1:
+                    trend_direction = "recovering"
+                else:
+                    trend_direction = "stable"
+
+            s["trend_direction"] = trend_direction
 
             raw = (s["severity_score"] * 0.45) + (persistence * 0.35) + (s["market_score"] * 0.20)
             signal_level = int(round(raw * 2))
@@ -850,12 +1096,13 @@ def insert_signals(conn, signals: list[dict]) -> None:
                     source_file,
                     forecast_start,
                     forecast_end,
-                    details
+                    details,
+                    trend_direction
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s,
-                    %s, %s, %s, %s::jsonb
+                    %s, %s, %s, %s::jsonb, %s
                 )
                 """,
                 (
@@ -883,6 +1130,7 @@ def insert_signals(conn, signals: list[dict]) -> None:
                     s["forecast_start"],
                     s["forecast_end"],
                     json.dumps(s["details"], default=str),
+                    s.get("trend_direction", "new"),
                 ),
             )
         conn.commit()
