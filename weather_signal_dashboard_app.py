@@ -1,10 +1,11 @@
 import json
 import os
-from datetime import datetime
 
 import pandas as pd
 import psycopg
 import streamlit as st
+
+from weather_market_map import get_best_trade_expressions, get_event_market_map
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -16,92 +17,6 @@ st.caption("Early weather intelligence for markets ranked like a trading radar."
 if not DATABASE_URL:
     st.error("DATABASE_URL environment variable is not set.")
     st.stop()
-
-COMMODITY_MAP = {
-    "Corn": {
-        "vehicle": "CORN",
-        "stocks_long": ["ADM", "BG", "CF", "MOS", "CTVA", "DE", "UNP"],
-    },
-    "Soybeans": {
-        "vehicle": "SOYB",
-        "stocks_long": ["ADM", "BG", "CF", "MOS", "CTVA", "DE"],
-    },
-    "Wheat": {
-        "vehicle": "WEAT",
-        "stocks_long": ["ADM", "BG", "MOS", "CF", "DE"],
-    },
-    "Coffee": {
-        "vehicle": "JO",
-        "stocks_long": ["SBUX", "NSRGY"],
-    },
-    "Sugar": {
-        "vehicle": "CANE",
-        "stocks_long": ["CZZ", "TRRJF"],
-    },
-    "Natural Gas": {
-        "vehicle": "UNG",
-        "stocks_long": ["EQT", "LNG", "CTRA", "RRC"],
-    },
-    "Oil": {
-        "vehicle": "USO",
-        "stocks_long": ["XOM", "CVX", "COP"],
-    },
-    "Power Utilities": {
-        "vehicle": "XLU",
-        "stocks_long": ["NEE", "DUK", "SO", "AEP"],
-    },
-    "Coal": {
-        "vehicle": "KOL",
-        "stocks_long": ["BTU", "ARCH", "AMR"],
-    },
-    "Rice": {
-        "vehicle": "DBA",
-        "stocks_long": ["ADM", "BG"],
-    },
-}
-
-EVENT_OVERLAY = {
-    "hurricane_risk": {
-        "long": ["HD", "LOW", "GNRC", "CAT", "VMC", "XOM", "CVX"],
-        "short": ["ALL", "TRV", "CB"],
-    },
-    "flood_risk": {
-        "long": ["CAT", "VMC", "MLM", "XYL", "HD", "LOW"],
-        "short": ["ALL", "TRV", "CB"],
-    },
-    "heavy_rain": {
-        "long": ["CAT", "VMC", "MLM"],
-        "short": ["ALL", "TRV", "CB"],
-    },
-    "storm_wind": {
-        "long": ["GNRC", "CAT", "VMC"],
-        "short": ["ALL", "TRV", "CB"],
-    },
-    "wildfire_risk": {
-        "long": ["GNRC", "CAT", "VMC", "HD", "LOW"],
-        "short": ["PCG"],
-    },
-    "cold_wave": {
-        "long": ["LNG", "EQT", "CTRA", "RRC"],
-        "short": ["DAL", "UAL", "AAL"],
-    },
-    "frost": {
-        "long": ["LNG", "EQT", "CTRA", "RRC"],
-        "short": [],
-    },
-    "heatwave": {
-        "long": ["GNRC"],
-        "short": [],
-    },
-    "extreme_heat": {
-        "long": ["GNRC"],
-        "short": [],
-    },
-    "drought": {
-        "long": [],
-        "short": [],
-    },
-}
 
 
 def read_sql(query: str) -> pd.DataFrame:
@@ -206,14 +121,20 @@ def trade_label_from_bias(value: str) -> str:
 def normalize_anomaly_key(value: str) -> str:
     raw = normalize_text(value, "").lower().strip()
     mapping = {
-        "extreme_heat": "heatwave",
+        "extreme_heat": "extreme_heat",
+        "heatwave": "heatwave",
         "frost": "frost",
         "cold_wave": "cold_wave",
         "heavy_rain": "heavy_rain",
         "flood_risk": "flood_risk",
+        "flood": "flood",
         "storm_wind": "storm_wind",
         "wildfire_risk": "wildfire_risk",
+        "wildfire": "wildfire",
         "hurricane_risk": "hurricane_risk",
+        "hurricane": "hurricane",
+        "drought": "drought",
+        "tornado": "tornado",
     }
     return mapping.get(raw, raw)
 
@@ -235,6 +156,16 @@ def infer_trade(row) -> str:
         return direct
 
     anomaly = normalize_anomaly_key(row.get("anomaly_type"))
+    event_map = get_event_market_map(anomaly)
+
+    long_names = event_map.get("equities_long_tier1", []) or event_map.get("equities_long", [])
+    short_names = event_map.get("equities_short_tier1", []) or event_map.get("equities_short", [])
+
+    if long_names and not short_names:
+        return "Long"
+    if short_names and not long_names:
+        return "Short"
+
     ctype = commodity_context_type(row)
     commodity = normalize_text(row.get("commodity"), "")
 
@@ -244,13 +175,13 @@ def infer_trade(row) -> str:
     if anomaly in {"cold_wave", "frost"} and commodity in {"Natural Gas", "Power Utilities", "Wheat"}:
         return "Long"
 
-    if anomaly in {"heavy_rain", "flood_risk"} and ctype == "ag":
+    if anomaly in {"heavy_rain", "flood_risk", "flood"} and ctype == "ag":
         return "Short"
 
-    if anomaly in {"heavy_rain", "flood_risk"} and ctype in {"energy", "utilities"}:
+    if anomaly in {"heavy_rain", "flood_risk", "flood"} and ctype in {"energy", "utilities"}:
         return "Long"
 
-    if anomaly in {"storm_wind", "hurricane_risk", "wildfire_risk"} and ctype in {"energy", "utilities"}:
+    if anomaly in {"storm_wind", "hurricane_risk", "hurricane", "wildfire_risk", "wildfire"} and ctype in {"energy", "utilities"}:
         return "Long"
 
     return "No Trade"
@@ -262,6 +193,8 @@ def conviction_badge(bucket: str) -> str:
         return "<span style='background:#7f1d1d;color:#fecaca;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>HIGH</span>"
     if bucket == "MEDIUM":
         return "<span style='background:#78350f;color:#fde68a;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>MEDIUM</span>"
+    if bucket == "MIXED":
+        return "<span style='background:#312e81;color:#c7d2fe;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>MIXED</span>"
     return "<span style='background:#334155;color:#cbd5e1;padding:4px 10px;border-radius:999px;font-weight:700;font-size:0.85rem;'>EARLY</span>"
 
 
@@ -281,61 +214,39 @@ def build_title(row) -> str:
 
 
 def get_vehicle(row) -> str:
-    commodity = normalize_text(row.get("commodity"), "")
-    info = COMMODITY_MAP.get(commodity)
-    if info:
-        return info["vehicle"]
-    return commodity if commodity else "-"
-
-
-def get_commodity_stocks(row) -> list[str]:
-    commodity = normalize_text(row.get("commodity"), "")
-    info = COMMODITY_MAP.get(commodity)
-    if info:
-        return info.get("stocks_long", [])
-    return []
-
-
-def get_event_overlay_longs(row) -> list[str]:
     anomaly = normalize_anomaly_key(row.get("anomaly_type"))
-    return EVENT_OVERLAY.get(anomaly, {}).get("long", [])
+    trade_map = get_best_trade_expressions(anomaly)
+    vehicle = normalize_text(trade_map.get("preferred_vehicle"), "")
+    if vehicle and vehicle != "-":
+        return vehicle
 
-
-def get_event_overlay_shorts(row) -> list[str]:
-    anomaly = normalize_anomaly_key(row.get("anomaly_type"))
-    return EVENT_OVERLAY.get(anomaly, {}).get("short", [])
-
-
-def dedupe_keep_order(items: list[str]) -> list[str]:
-    seen = set()
-    out = []
-    for item in items:
-        if item not in seen:
-            out.append(item)
-            seen.add(item)
-    return out
+    commodity = normalize_text(row.get("commodity"), "")
+    fallback = {
+        "Corn": "CORN",
+        "Soybeans": "SOYB",
+        "Wheat": "WEAT",
+        "Coffee": "JO",
+        "Sugar": "CANE",
+        "Natural Gas": "UNG",
+        "Oil": "USO",
+        "Power Utilities": "XLU",
+        "Coal": "KOL",
+        "Rice": "DBA",
+    }
+    return fallback.get(commodity, commodity if commodity else "-")
 
 
 def get_stock_trade_symbols(row) -> tuple[str, list[str]]:
+    anomaly = normalize_anomaly_key(row.get("anomaly_type"))
     trade = infer_trade(row)
-    ctype = commodity_context_type(row)
-
-    commodity_stocks = get_commodity_stocks(row)
-    overlay_longs = get_event_overlay_longs(row)
-    overlay_shorts = get_event_overlay_shorts(row)
+    trade_map = get_best_trade_expressions(anomaly)
 
     if trade == "Long":
-        if ctype in {"ag", "energy", "utilities"}:
-            names = dedupe_keep_order(commodity_stocks + overlay_longs)[:5]
-            return "Long", names
-        names = overlay_longs[:5]
+        names = trade_map.get("best_longs", [])[:3]
         return "Long", names
 
     if trade == "Short":
-        if ctype == "ag":
-            names = commodity_stocks[:5]
-            return "Short", names
-        names = overlay_shorts[:5]
+        names = trade_map.get("best_shorts", [])[:3]
         return "Short", names
 
     return "No Trade", []
@@ -397,27 +308,27 @@ def build_trigger_evidence(row) -> list[str]:
     precip = safe_float(details.get("precip_mm_7d"))
     wind = safe_float(details.get("wind_ms_max"))
 
-    if anomaly == "heatwave":
+    if anomaly in {"heatwave", "extreme_heat"}:
         if temp_max is not None:
-            evidence.append(f"Max temp: {temp_max:.1f}°C (heat trigger > 35°C)")
+            evidence.append(f"Max temp: {temp_max:.1f}°C")
         if temp_mean is not None:
             evidence.append(f"Mean temp: {temp_mean:.1f}°C")
 
     if anomaly == "drought":
         if precip is not None:
-            evidence.append(f"Rainfall: {precip:.1f} mm (drought trigger ≤ 10 mm)")
+            evidence.append(f"Rainfall: {precip:.1f} mm")
         if temp_mean is not None:
-            evidence.append(f"Mean temp: {temp_mean:.1f}°C (heat stress condition ≥ 28°C)")
+            evidence.append(f"Mean temp: {temp_mean:.1f}°C")
 
     if anomaly in {"frost", "cold_wave"}:
         if temp_min is not None:
             evidence.append(f"Min temp: {temp_min:.1f}°C")
 
-    if anomaly in {"heavy_rain", "flood_risk"}:
+    if anomaly in {"heavy_rain", "flood_risk", "flood"}:
         if precip is not None:
             evidence.append(f"Rainfall: {precip:.1f} mm")
 
-    if anomaly in {"storm_wind", "hurricane_risk", "wildfire_risk"}:
+    if anomaly in {"storm_wind", "hurricane_risk", "hurricane", "wildfire_risk", "wildfire"}:
         if wind is not None:
             evidence.append(f"Wind: {wind:.1f} m/s")
         if temp_max is not None:
@@ -436,7 +347,6 @@ def build_trigger_evidence(row) -> list[str]:
 def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
     raw_rows = []
 
-    # Build raw symbol-level rows first
     for _, row in df.iterrows():
         trade, symbols = get_stock_trade_symbols(row)
         if not symbols:
@@ -468,10 +378,8 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     raw_df = pd.DataFrame(raw_rows)
-
     final_rows = []
 
-    # Resolve conflicts so each symbol appears only once
     for symbol, group in raw_df.groupby("Symbol", sort=False):
         long_group = group[group["Trade"] == "Long"]
         short_group = group[group["Trade"] == "Short"]
