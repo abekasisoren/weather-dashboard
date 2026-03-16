@@ -242,6 +242,7 @@ ASSET_MAP = {
     },
 }
 
+
 def log(msg: str) -> None:
     print(f"[{datetime.now(UTC).isoformat()}] {msg}", flush=True)
 
@@ -379,6 +380,51 @@ def sanitize_details(details: dict) -> dict:
     return clean
 
 
+def safe_precip_value_mm(tp_region: xr.DataArray) -> float:
+    """
+    Safer precipitation logic:
+    - ECMWF tp is often cumulative
+    - use final minus initial if possible
+    - then compute a regional mean, not a crazy max grid-cell spike
+    - clamp impossible values
+    """
+    precip_mm = tp_region * 1000.0
+
+    try:
+        if "step" in precip_mm.coords and precip_mm.sizes.get("step", 0) > 1:
+            first = precip_mm.isel(step=0)
+            last = precip_mm.isel(step=-1)
+            total_mm = last - first
+        elif "valid_time" in precip_mm.coords and precip_mm.sizes.get("valid_time", 0) > 1:
+            first = precip_mm.isel(valid_time=0)
+            last = precip_mm.isel(valid_time=-1)
+            total_mm = last - first
+        elif "time" in precip_mm.coords and precip_mm.sizes.get("time", 0) > 1:
+            first = precip_mm.isel(time=0)
+            last = precip_mm.isel(time=-1)
+            total_mm = last - first
+        else:
+            total_mm = precip_mm
+    except Exception:
+        total_mm = precip_mm
+
+    try:
+        total_mm = total_mm.where(total_mm >= 0, 0)
+    except Exception:
+        pass
+
+    mean_mm = float(total_mm.mean(skipna=True).values)
+
+    if not np.isfinite(mean_mm):
+        return 0.0
+
+    # Safety clamp for clearly broken values
+    if mean_mm > 2000:
+        return 2000.0
+
+    return mean_mm
+
+
 def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> dict:
     stats = {
         "temp_c_max": None,
@@ -424,8 +470,7 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
 
     if tp_name:
         tp = trim_forecast_horizon(subset_region(ds_tp[tp_name], region))
-        precip_mm = tp * 1000.0
-        stats["precip_mm_7d"] = float(precip_mm.max(skipna=True).values)
+        stats["precip_mm_7d"] = safe_precip_value_mm(tp)
 
         if stats["forecast_start"] is None:
             if "valid_time" in tp.coords:
