@@ -1101,11 +1101,8 @@ with tab_radar:
         st.write("No signals match the current filters.")
     else:
         display_cols = [
-            "Region", "Commodity", "Anomaly", "Trade", "Trend", "Conviction",
-            "Signal", "Persistence", "Market", "Severity",
-            "Commodity Trade", "Stock Trade", "Vehicle",
-            "Weather Strength", "Mapping Quality", "Execution Quality",
-            "Seasonality", "Trend Factor", "Final Trade Score",
+            "Region", "Commodity", "Anomaly", "Trade", "Conviction", "Trend",
+            "Vehicle", "Stock Trade", "Final Trade Score",
         ]
         available_cols = [c for c in display_cols if c in filtered_ranked.columns]
         st.dataframe(filtered_ranked[available_cols], use_container_width=True, height=400)
