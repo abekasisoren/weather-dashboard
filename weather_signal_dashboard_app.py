@@ -434,38 +434,120 @@ def build_trigger_evidence(row) -> list[str]:
 
 
 def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
-    rows = []
+    raw_rows = []
 
+    # Build raw symbol-level rows first
     for _, row in df.iterrows():
         trade, symbols = get_stock_trade_symbols(row)
         if not symbols:
             continue
 
+        signal = safe_int(row.get("signal_level"))
+        signal_bucket = normalize_text(row.get("signal_bucket"), score_bucket(signal))
+
         for symbol in symbols:
-            rows.append(
+            raw_rows.append(
                 {
-                    "Date": format_date_only(row.get("created_at") if not is_missing(row.get("created_at")) else row.get("timestamp")),
-                    "Stock Trade": symbol,
+                    "Date": format_date_only(
+                        row.get("created_at") if not is_missing(row.get("created_at")) else row.get("timestamp")
+                    ),
+                    "Symbol": symbol,
                     "Trade": trade,
-                    "Why It Matters": get_why_it_matters(row),
+                    "Signal": signal,
+                    "Why": get_why_it_matters(row),
                     "Region": normalize_text(row.get("region")),
                     "Commodity": normalize_text(row.get("commodity")),
                     "Anomaly": normalize_text(row.get("anomaly_type")).replace("_", " ").title(),
                     "Vehicle": get_vehicle(row),
                     "Commodity Trade": get_commodity_trade(row),
-                    "Signal": safe_int(row.get("signal_level")),
-                    "Conviction": normalize_text(row.get("signal_bucket")),
+                    "Conviction": signal_bucket,
                 }
             )
 
-    if not rows:
+    if not raw_rows:
         return pd.DataFrame()
 
-    pulse_df = pd.DataFrame(rows)
+    raw_df = pd.DataFrame(raw_rows)
+
+    final_rows = []
+
+    # Resolve conflicts so each symbol appears only once
+    for symbol, group in raw_df.groupby("Symbol", sort=False):
+        long_group = group[group["Trade"] == "Long"]
+        short_group = group[group["Trade"] == "Short"]
+
+        long_score = int(long_group["Signal"].sum()) if not long_group.empty else 0
+        short_score = int(short_group["Signal"].sum()) if not short_group.empty else 0
+        net_score = long_score - short_score
+
+        if long_score == 0 and short_score == 0:
+            continue
+
+        if net_score >= 3 and not long_group.empty:
+            final_trade = "Long"
+            winner = long_group.sort_values(
+                by=["Signal", "Date", "Region", "Commodity"],
+                ascending=[False, False, True, True],
+            ).iloc[0]
+            display_signal = long_score
+            conviction = score_bucket(display_signal)
+            why = winner["Why"]
+
+        elif net_score <= -3 and not short_group.empty:
+            final_trade = "Short"
+            winner = short_group.sort_values(
+                by=["Signal", "Date", "Region", "Commodity"],
+                ascending=[False, False, True, True],
+            ).iloc[0]
+            display_signal = short_score
+            conviction = score_bucket(display_signal)
+            why = winner["Why"]
+
+        else:
+            winner = group.sort_values(
+                by=["Signal", "Date", "Region", "Commodity"],
+                ascending=[False, False, True, True],
+            ).iloc[0]
+            final_trade = "No Trade"
+            display_signal = max(long_score, short_score)
+            conviction = "MIXED"
+
+            long_reason = long_group.sort_values("Signal", ascending=False).iloc[0]["Why"] if not long_group.empty else ""
+            short_reason = short_group.sort_values("Signal", ascending=False).iloc[0]["Why"] if not short_group.empty else ""
+
+            if long_reason and short_reason:
+                why = f"Conflicting weather signals. Bullish case: {long_reason} Bearish case: {short_reason}"
+            elif long_reason:
+                why = f"Conflicting setup, but bullish signals are present: {long_reason}"
+            elif short_reason:
+                why = f"Conflicting setup, but bearish signals are present: {short_reason}"
+            else:
+                why = "Conflicting weather signals."
+
+        final_rows.append(
+            {
+                "Date": winner["Date"],
+                "Stock Trade": symbol,
+                "Trade": final_trade,
+                "Why It Matters": why,
+                "Region": winner["Region"],
+                "Commodity": winner["Commodity"],
+                "Anomaly": winner["Anomaly"],
+                "Vehicle": winner["Vehicle"],
+                "Commodity Trade": winner["Commodity Trade"],
+                "Signal": display_signal,
+                "Conviction": conviction,
+            }
+        )
+
+    if not final_rows:
+        return pd.DataFrame()
+
+    pulse_df = pd.DataFrame(final_rows)
 
     pulse_df = pulse_df.sort_values(
-        by=["Date", "Signal", "Region", "Commodity", "Stock Trade"],
-        ascending=[False, False, True, True, True],
+        by=["Signal", "Stock Trade"],
+        ascending=[False, True],
     ).reset_index(drop=True)
 
     return pulse_df
