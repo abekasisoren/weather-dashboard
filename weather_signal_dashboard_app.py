@@ -141,6 +141,18 @@ def format_dt(value) -> str:
         return str(value)
 
 
+def format_date_only(value) -> str:
+    if is_missing(value):
+        return "-"
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return str(value)
+        return parsed.strftime("%Y-%m-%d")
+    except Exception:
+        return str(value)
+
+
 def parse_jsonish(value):
     if is_missing(value):
         return {}
@@ -304,7 +316,7 @@ def dedupe_keep_order(items: list[str]) -> list[str]:
     return out
 
 
-def get_stock_trade(row) -> str:
+def get_stock_trade_symbols(row) -> tuple[str, list[str]]:
     trade = infer_trade(row)
     ctype = commodity_context_type(row)
 
@@ -315,18 +327,25 @@ def get_stock_trade(row) -> str:
     if trade == "Long":
         if ctype in {"ag", "energy", "utilities"}:
             names = dedupe_keep_order(commodity_stocks + overlay_longs)[:5]
-            return f"Long {', '.join(names)}" if names else "-"
+            return "Long", names
         names = overlay_longs[:5]
-        return f"Long {', '.join(names)}" if names else "-"
+        return "Long", names
 
     if trade == "Short":
         if ctype == "ag":
             names = commodity_stocks[:5]
-            return f"Short {', '.join(names)}" if names else "-"
+            return "Short", names
         names = overlay_shorts[:5]
-        return f"Short {', '.join(names)}" if names else "-"
+        return "Short", names
 
-    return "-"
+    return "No Trade", []
+
+
+def get_stock_trade(row) -> str:
+    trade, names = get_stock_trade_symbols(row)
+    if not names:
+        return "-"
+    return f"{trade} {', '.join(names)}"
 
 
 def get_commodity_trade(row) -> str:
@@ -412,6 +431,44 @@ def build_trigger_evidence(row) -> list[str]:
     evidence.append(f"Market score: {safe_int(row.get('market_score'))}")
 
     return evidence
+
+
+def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+
+    for _, row in df.iterrows():
+        trade, symbols = get_stock_trade_symbols(row)
+        if not symbols:
+            continue
+
+        for symbol in symbols:
+            rows.append(
+                {
+                    "Date": format_date_only(row.get("created_at") if not is_missing(row.get("created_at")) else row.get("timestamp")),
+                    "Stock Trade": symbol,
+                    "Trade": trade,
+                    "Why It Matters": get_why_it_matters(row),
+                    "Region": normalize_text(row.get("region")),
+                    "Commodity": normalize_text(row.get("commodity")),
+                    "Anomaly": normalize_text(row.get("anomaly_type")).replace("_", " ").title(),
+                    "Vehicle": get_vehicle(row),
+                    "Commodity Trade": get_commodity_trade(row),
+                    "Signal": safe_int(row.get("signal_level")),
+                    "Conviction": normalize_text(row.get("signal_bucket")),
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame()
+
+    pulse_df = pd.DataFrame(rows)
+
+    pulse_df = pulse_df.sort_values(
+        by=["Date", "Signal", "Region", "Commodity", "Stock Trade"],
+        ascending=[False, False, True, True, True],
+    ).reset_index(drop=True)
+
+    return pulse_df
 
 
 def show_trade_card(row, rank_number=None):
@@ -604,36 +661,12 @@ st.dataframe(table_df, use_container_width=True)
 
 st.header("🌐 Global Pulse Trader")
 
-pulse_df = filtered[filtered["signal_level"] == 10].copy()
+pulse_source = filtered[filtered["signal_level"] == 10].copy()
+pulse_table = build_global_pulse_trader_table(pulse_source)
 
-if pulse_df.empty:
+if pulse_table.empty:
     st.write("No 10-score recommendations right now.")
 else:
-    pulse_table = pulse_df[
-        [
-            "region",
-            "commodity",
-            "anomaly_type",
-            "trade_display",
-        ]
-    ].copy()
-
-    pulse_table["Commodity Trade"] = pulse_df.apply(get_commodity_trade, axis=1)
-    pulse_table["Stock Trade"] = pulse_df.apply(get_stock_trade, axis=1)
-    pulse_table["Vehicle"] = pulse_df.apply(get_vehicle, axis=1)
-    pulse_table["Why It Matters"] = pulse_df.apply(get_why_it_matters, axis=1)
-
-    pulse_table = pulse_table.rename(
-        columns={
-            "region": "Region",
-            "commodity": "Commodity",
-            "anomaly_type": "Anomaly",
-            "trade_display": "Trade",
-        }
-    )
-
-    pulse_table["Anomaly"] = pulse_table["Anomaly"].astype(str).str.replace("_", " ", regex=False).str.title()
-
     st.dataframe(pulse_table, use_container_width=True)
 
 with st.expander("Raw filtered table"):
