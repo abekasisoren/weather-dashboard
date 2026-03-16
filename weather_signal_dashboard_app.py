@@ -17,7 +17,6 @@ if not DATABASE_URL:
     st.error("DATABASE_URL environment variable is not set.")
     st.stop()
 
-# REAL ETF / STOCK MAPS
 COMMODITY_MAP = {
     "Corn": {
         "vehicle": "CORN",
@@ -61,7 +60,6 @@ COMMODITY_MAP = {
     },
 }
 
-# EVENT OVERLAYS = EXTRA NAMES, ONLY WHEN THEY MAKE SENSE
 EVENT_OVERLAY = {
     "hurricane_risk": {
         "long": ["HD", "LOW", "GNRC", "CAT", "VMC", "XOM", "CVX"],
@@ -225,8 +223,8 @@ def infer_trade(row) -> str:
         return direct
 
     anomaly = normalize_anomaly_key(row.get("anomaly_type"))
-    commodity = normalize_text(row.get("commodity"), "")
     ctype = commodity_context_type(row)
+    commodity = normalize_text(row.get("commodity"), "")
 
     if anomaly in {"heatwave", "extreme_heat", "drought"} and ctype in {"ag", "energy", "utilities"}:
         return "Long"
@@ -603,6 +601,40 @@ table_df = table_df.rename(
 table_df["Anomaly"] = table_df["Anomaly"].astype(str).str.replace("_", " ", regex=False).str.title()
 
 st.dataframe(table_df, use_container_width=True)
+
+st.header("🌐 Global Pulse Trader")
+
+pulse_df = filtered[filtered["signal_level"] == 10].copy()
+
+if pulse_df.empty:
+    st.write("No 10-score recommendations right now.")
+else:
+    pulse_table = pulse_df[
+        [
+            "region",
+            "commodity",
+            "anomaly_type",
+            "trade_display",
+        ]
+    ].copy()
+
+    pulse_table["Commodity Trade"] = pulse_df.apply(get_commodity_trade, axis=1)
+    pulse_table["Stock Trade"] = pulse_df.apply(get_stock_trade, axis=1)
+    pulse_table["Vehicle"] = pulse_df.apply(get_vehicle, axis=1)
+    pulse_table["Why It Matters"] = pulse_df.apply(get_why_it_matters, axis=1)
+
+    pulse_table = pulse_table.rename(
+        columns={
+            "region": "Region",
+            "commodity": "Commodity",
+            "anomaly_type": "Anomaly",
+            "trade_display": "Trade",
+        }
+    )
+
+    pulse_table["Anomaly"] = pulse_table["Anomaly"].astype(str).str.replace("_", " ", regex=False).str.title()
+
+    st.dataframe(pulse_table, use_container_width=True)
 
 with st.expander("Raw filtered table"):
     st.dataframe(filtered, use_container_width=True)
