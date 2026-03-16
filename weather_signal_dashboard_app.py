@@ -735,6 +735,7 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
                 "Stock Trade": symbol,
                 "Trade": final_trade,
                 "Why It Matters": why,
+                "Final Trade Score": round(final_trade_score, 2),
                 "Region": winner["Region"],
                 "Commodity": winner["Commodity"],
                 "Anomaly": winner["Anomaly"],
@@ -1112,26 +1113,23 @@ with tab_radar:
 
 with tab_pulse:
     st.header("🌐 Global Pulse Trader")
-    st.caption("Symbol-centric view — aggregates all weather signals per stock.")
+    st.caption("One row per equity — aggregates all weather signals per stock.")
 
     pulse_source = filtered.copy()
     pulse_table = build_global_pulse_trader_table(pulse_source)
 
+    _pulse_cols = ["Date", "Stock Trade", "Trade", "Why It Matters", "Final Trade Score"]
+
     if pulse_table.empty:
-        st.write("No high-quality recommendations right now.")
+        st.write("No recommendations right now.")
     else:
-        high_conviction = pulse_table[pulse_table["Signal"] >= 7].copy()
-        high_conviction = high_conviction[high_conviction["Trade"] != "No Trade"].copy()
+        display_pulse = pulse_table[
+            [c for c in _pulse_cols if c in pulse_table.columns]
+        ].copy()
+        st.dataframe(display_pulse, use_container_width=True, height=500)
 
-        if high_conviction.empty:
-            st.info("No signals above threshold. Showing all signals.")
+        with st.expander(f"Full detail ({len(pulse_table)} rows)"):
             st.dataframe(pulse_table, use_container_width=True)
-        else:
-            st.dataframe(high_conviction, use_container_width=True)
-
-        if not pulse_table.empty and len(pulse_table) > len(high_conviction if not high_conviction.empty else pulse_table):
-            with st.expander(f"All signals including lower conviction ({len(pulse_table)} total)"):
-                st.dataframe(pulse_table, use_container_width=True)
 
 with tab_media:
     st.header("📡 Media Signal Validation")
