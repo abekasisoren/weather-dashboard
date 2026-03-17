@@ -10,7 +10,10 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import os
+import sys
+import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -50,38 +53,76 @@ def ensure_schema() -> None:
 
 # ─── Price fetching ───────────────────────────────────────────────────────────
 
+def _yahoo_direct(symbol: str) -> Optional[float]:
+    """
+    Hit Yahoo Finance chart API directly with a browser User-Agent.
+    Returns regularMarketPrice (~15-min delayed) or previousClose.
+    Works on cloud hosts where yfinance's session sometimes gets blocked.
+    """
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        "?interval=1d&range=2d&includePrePost=false"
+    )
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        meta = data["chart"]["result"][0]["meta"]
+        price = meta.get("regularMarketPrice") or meta.get("previousClose")
+        return round(float(price), 4) if price else None
+    except Exception as e:
+        print(f"[_yahoo_direct] {symbol}: {e}", file=sys.stderr)
+        return None
+
+
 def fetch_prices(symbols: list[str]) -> dict[str, Optional[float]]:
     """
-    Fetch latest prices for a list of symbols via yfinance (~15-min delayed intraday).
-    Primary: fast_info.last_price  (intraday delayed quote)
-    Fallback: history(period="2d") (last EOD close)
-    Returns {symbol: price} — price is None if fetch fails.
+    Fetch latest prices (~15-min delayed intraday) for a list of symbols.
+    Tier 1: Direct Yahoo Finance chart API (browser UA — works on cloud hosts)
+    Tier 2: yfinance fast_info.last_price
+    Tier 3: yfinance history(period="2d")
+    Returns {symbol: price} — price is None if all tiers fail.
     """
     prices: dict[str, Optional[float]] = {s: None for s in symbols}
     if not symbols:
         return prices
-    try:
-        import yfinance as yf
-        for symbol in symbols:
+
+    for symbol in symbols:
+        # Tier 1 — direct Yahoo API
+        price = _yahoo_direct(symbol)
+
+        # Tier 2 — yfinance fast_info
+        if not price:
             try:
-                ticker = yf.Ticker(symbol)
-                # Primary: intraday delayed price (~15 min delay)
-                price = None
-                try:
-                    price = ticker.fast_info.last_price
-                except Exception:
-                    pass
-                # Fallback: last EOD close from history
-                if not price:
-                    hist = ticker.history(period="2d", auto_adjust=True)
-                    if not hist.empty:
-                        price = float(hist["Close"].iloc[-1])
-                if price:
-                    prices[symbol] = round(float(price), 4)
-            except Exception:
-                pass
-    except Exception:
-        pass
+                import yfinance as yf
+                price = yf.Ticker(symbol).fast_info.last_price
+            except Exception as e:
+                print(f"[fetch_prices] fast_info {symbol}: {e}", file=sys.stderr)
+
+        # Tier 3 — yfinance history
+        if not price:
+            try:
+                import yfinance as yf
+                hist = yf.Ticker(symbol).history(period="2d", auto_adjust=True)
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+            except Exception as e:
+                print(f"[fetch_prices] history {symbol}: {e}", file=sys.stderr)
+
+        if price:
+            prices[symbol] = round(float(price), 4)
+        else:
+            print(f"[fetch_prices] all tiers failed for {symbol}", file=sys.stderr)
+
     return prices
 
 
