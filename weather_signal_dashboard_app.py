@@ -1133,43 +1133,115 @@ with tab_pulse:
 
 with tab_media:
     st.header("📡 Media Signal Validation")
-    st.caption("Cross-reference weather signals with news and official alerts.")
+    st.caption("Cross-reference active weather signals against NOAA/NWS official alerts and NewsAPI headlines.")
 
-    # Check if any signals have been media-validated
+    from media_validator import MediaValidator, write_validation_to_db
+
+    validator = MediaValidator()
+    newsapi_configured = bool(os.environ.get("NEWSAPI_KEY"))
+
+    # ── Status bar ────────────────────────────────────────────────────────────
+    status_cols = st.columns(2)
+    status_cols[0].success("✅ NOAA/NWS — always live (free public API)")
+    if newsapi_configured:
+        status_cols[1].success("✅ NewsAPI — connected")
+    else:
+        status_cols[1].warning("⚠️ NewsAPI — not configured (set NEWSAPI_KEY for news headlines)")
+
+    st.divider()
+
+    # ── Run validation ────────────────────────────────────────────────────────
+    top_signals = filtered_ranked[filtered_ranked["Conviction"].isin({"PRIME", "ACTIONABLE"})].copy()
+
+    col_run, col_info = st.columns([1, 4])
+    run_clicked = col_run.button("🔍 Run Validation", type="primary")
+    col_info.caption(
+        f"Will validate **{min(len(top_signals), 20)}** PRIME/ACTIONABLE signals against NOAA alerts"
+        + (" and NewsAPI headlines." if newsapi_configured else ". Add NEWSAPI_KEY to also check news headlines.")
+    )
+
+    if run_clicked:
+        # Build signal list from top ranked rows (map back to DB rows)
+        signal_rows = []
+        for _, ranked_row in top_signals.head(20).iterrows():
+            match = df[
+                (df["region"].astype(str) == str(ranked_row.get("Region", ""))) &
+                (df["commodity"].astype(str) == str(ranked_row.get("Commodity", ""))) &
+                (df["anomaly_type"].astype(str) == normalize_anomaly_key(str(ranked_row.get("Anomaly", "")).lower().replace(" ", "_")))
+            ]
+            if not match.empty:
+                db_row = match.iloc[0]
+                signal_rows.append({
+                    "id": None,  # no id column in current query; write skipped
+                    "region": str(db_row.get("region", "")),
+                    "anomaly_type": str(db_row.get("anomaly_type", "")),
+                    "commodity": str(db_row.get("commodity", "")),
+                    "conviction": ranked_row.get("Conviction", ""),
+                    "final_score": ranked_row.get("Final Trade Score", 0),
+                    "trade": ranked_row.get("Trade", ""),
+                })
+
+        if not signal_rows:
+            st.info("No PRIME/ACTIONABLE signals found to validate.")
+        else:
+            live_results = []
+            progress = st.progress(0, text="Validating signals…")
+            for i, sig in enumerate(signal_rows):
+                summary = validator.validate_signal(
+                    signal_id=sig["id"],
+                    region=sig["region"],
+                    anomaly=sig["anomaly_type"],
+                    commodity=sig["commodity"],
+                )
+                if summary.is_confirmed and summary.best_result:
+                    br = summary.best_result
+                    live_results.append({
+                        "Region": sig["region"],
+                        "Anomaly": sig["anomaly_type"].replace("_", " ").title(),
+                        "Commodity": sig["commodity"],
+                        "Trade": sig["trade"],
+                        "Score": sig["final_score"],
+                        "Conviction": sig["conviction"],
+                        "Source": br.source,
+                        "Headline": br.headline,
+                        "Match Score": round(br.score, 1),
+                        "URL": br.url,
+                    })
+                progress.progress((i + 1) / len(signal_rows), text=f"Checked {i+1}/{len(signal_rows)}: {sig['region']} {sig['anomaly_type']}")
+
+            progress.empty()
+
+            if live_results:
+                st.success(f"✅ {len(live_results)} signal(s) confirmed by external sources")
+                live_df = pd.DataFrame(live_results).sort_values("Score", ascending=False)
+                st.dataframe(live_df.drop(columns=["URL"]), use_container_width=True)
+                st.caption("Sources:")
+                for r in live_results:
+                    if r["URL"]:
+                        st.markdown(f"- [{r['Headline'][:100]}]({r['URL']}) — *{r['Source']}*")
+            else:
+                st.info("No external confirmation found for current PRIME/ACTIONABLE signals. NOAA may have no active alerts in these regions right now.")
+
+    st.divider()
+
+    # ── DB-persisted confirmations ────────────────────────────────────────────
     has_media_validated = (
         "media_validated" in df.columns
         and df["media_validated"].notna().any()
         and df["media_validated"].eq(True).any()
     )
 
-    newsapi_configured = bool(os.environ.get("NEWSAPI_KEY"))
-    noaa_configured = bool(os.environ.get("NOAA_API_KEY"))
-
-    if not newsapi_configured and not noaa_configured:
-        st.info(
-            "**Media validation not yet configured.**\n\n"
-            "To enable real-time news confirmation of weather signals, set the following environment variables:\n"
-            "- `NEWSAPI_KEY` — [newsapi.org](https://newsapi.org) API key for news headlines\n"
-            "- `NOAA_API_KEY` — NOAA/NWS official weather alert API key (free)\n\n"
-            "Once configured, this tab will show which signals have been confirmed by published news or official alerts."
-        )
-    else:
-        connected = []
-        if newsapi_configured:
-            connected.append("NewsAPI")
-        if noaa_configured:
-            connected.append("NOAA/NWS")
-        st.success(f"Connected: {', '.join(connected)}")
-
+    st.subheader("📰 Previously Confirmed (from DB)")
     if has_media_validated:
-        st.subheader("Confirmed Signals")
         media_df = df[df["media_validated"] == True].copy()
         cols = ["region", "commodity", "anomaly_type", "signal_level", "trade_bias", "media_headline", "media_source"]
-        available_media_cols = [c for c in cols if c in media_df.columns]
-        st.dataframe(media_df[available_media_cols], use_container_width=True)
+        st.dataframe(media_df[[c for c in cols if c in media_df.columns]], use_container_width=True)
     else:
-        st.write("No media-confirmed signals yet. When media validation runs, confirmed signals will appear here.")
+        st.write("No DB-persisted confirmations yet.")
 
+    st.divider()
+
+    # ── Anomaly coverage ──────────────────────────────────────────────────────
     st.subheader("Anomaly Coverage")
     coverage_counts = (
         df.groupby("anomaly_type")

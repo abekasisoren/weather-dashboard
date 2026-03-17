@@ -13,7 +13,10 @@ When keys are absent, all methods return None (graceful no-op).
 
 from __future__ import annotations
 
+import json
 import os
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Optional
@@ -115,13 +118,13 @@ class MediaValidator:
 
     def __init__(self):
         self.newsapi_key: Optional[str] = os.environ.get("NEWSAPI_KEY")
-        self.noaa_key: Optional[str] = os.environ.get("NOAA_API_KEY")
         self._newsapi_available = self.newsapi_key is not None
-        self._noaa_available = self.noaa_key is not None
+        # NOAA/NWS alerts API is free and public — no key required
+        self._noaa_available = True
 
     @property
     def is_configured(self) -> bool:
-        return self._newsapi_available or self._noaa_available
+        return True  # NOAA always works; NewsAPI is optional bonus
 
     def check_newsapi(
         self,
@@ -143,10 +146,6 @@ class MediaValidator:
         query = f"({keywords[0]}) AND ({region_terms[0]})"
 
         try:
-            import urllib.request
-            import urllib.parse
-            import json
-
             from_date = (datetime.now(UTC) - timedelta(hours=lookback_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
             params = urllib.parse.urlencode({
                 "q": query,
@@ -180,13 +179,15 @@ class MediaValidator:
             score = min(10.0, score)
 
             if score >= 5.0:
+                raw_dt = best.get("publishedAt")
+                published = datetime.fromisoformat(raw_dt.replace("Z", "+00:00")) if raw_dt else None
                 return MediaResult(
                     validated=True,
                     source="NewsAPI",
                     headline=title,
                     score=score,
                     url=best.get("url", ""),
-                    published_at=pd.to_datetime(best.get("publishedAt")) if best.get("publishedAt") else None,
+                    published_at=published,
                 )
 
         except Exception:
@@ -202,18 +203,12 @@ class MediaValidator:
         Check NOAA/NWS active alerts API for the given region.
         Returns list of MediaResult for any active alerts.
         """
-        if not self._noaa_available:
-            return []
-
         region_terms = REGION_CONTEXT.get(region, [])
         if not region_terms:
             return []
 
         results = []
         try:
-            import urllib.request
-            import json
-
             url = "https://api.weather.gov/alerts/active?status=actual&message_type=alert&limit=50"
             headers = {
                 "User-Agent": "WeatherRadar/1.0 (weather-trading-radar)",
@@ -269,12 +264,12 @@ class MediaValidator:
         if news_result:
             summary.results.append(news_result)
 
-        # NOAA check (only for US regions)
-        us_regions = {
+        # NOAA/NWS check — free public API, always available for US regions
+        US_REGIONS = {
             "US Midwest", "US Southern Plains", "US Gulf",
             "Southeast US", "California", "US Pacific Northwest",
         }
-        if region in us_regions:
+        if region in US_REGIONS:
             noaa_results = self.check_noaa_alerts(region)
             summary.results.extend(noaa_results)
 
@@ -288,8 +283,6 @@ class MediaValidator:
         Validate a list of signal dicts (each must have: id, region, anomaly_type, commodity).
         Returns dict mapping signal id → ValidationSummary.
         """
-        if not self.is_configured:
-            return {}
 
         results = {}
         for signal in signals:
@@ -343,22 +336,20 @@ def write_validation_to_db(conn, signal_id: int, summary: ValidationSummary) -> 
 
 if __name__ == "__main__":
     validator = MediaValidator()
-    print(f"MediaValidator configured: {validator.is_configured}")
     print(f"  NewsAPI: {'yes' if validator._newsapi_available else 'no (set NEWSAPI_KEY)'}")
-    print(f"  NOAA:    {'yes' if validator._noaa_available else 'no (set NOAA_API_KEY)'}")
+    print(f"  NOAA:    always available (free public API)")
 
-    if validator.is_configured:
-        test = validator.validate_signal(
-            signal_id=None,
-            region="US Midwest",
-            anomaly="drought",
-            commodity="Corn",
-        )
-        print(f"\nTest validation — US Midwest drought:")
-        print(f"  Confirmed: {test.is_confirmed}")
-        if test.best_result:
-            print(f"  Source: {test.best_result.source}")
-            print(f"  Headline: {test.best_result.headline}")
-            print(f"  Score: {test.best_result.score:.1f}")
+    test = validator.validate_signal(
+        signal_id=None,
+        region="US Midwest",
+        anomaly="drought",
+        commodity="Corn",
+    )
+    print(f"\nTest validation — US Midwest drought:")
+    print(f"  Confirmed: {test.is_confirmed}")
+    if test.best_result:
+        print(f"  Source: {test.best_result.source}")
+        print(f"  Headline: {test.best_result.headline}")
+        print(f"  Score: {test.best_result.score:.1f}")
     else:
-        print("\nNo API keys configured — set NEWSAPI_KEY or NOAA_API_KEY to test.")
+        print("  No confirmation found.")
