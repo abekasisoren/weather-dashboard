@@ -1334,7 +1334,7 @@ with tab_aftermath:
     fetched_at = st.session_state.get("aftermath_fetched_at", "—")
     qcol2.caption(f"Prices last fetched at **{fetched_at}**. Click to refresh mid-session.")
 
-    aftermath_df = st.session_state["aftermath_df"] or pd.DataFrame()
+    aftermath_df = st.session_state["aftermath_df"] if st.session_state["aftermath_df"] is not None else pd.DataFrame()
 
     if aftermath_df.empty:
         st.info("No recommendations logged yet. Click **Log Today's Picks** above to start tracking.")
