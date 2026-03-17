@@ -52,8 +52,9 @@ def ensure_schema() -> None:
 
 def fetch_prices(symbols: list[str]) -> dict[str, Optional[float]]:
     """
-    Fetch latest close prices for a list of symbols via yfinance.
-    Uses individual Ticker.history() calls — most reliable method on all platforms.
+    Fetch latest prices for a list of symbols via yfinance (~15-min delayed intraday).
+    Primary: fast_info.last_price  (intraday delayed quote)
+    Fallback: history(period="2d") (last EOD close)
     Returns {symbol: price} — price is None if fetch fails.
     """
     prices: dict[str, Optional[float]] = {s: None for s in symbols}
@@ -64,10 +65,19 @@ def fetch_prices(symbols: list[str]) -> dict[str, Optional[float]]:
         for symbol in symbols:
             try:
                 ticker = yf.Ticker(symbol)
-                hist = ticker.history(period="2d", auto_adjust=True)
-                if not hist.empty:
-                    price = float(hist["Close"].iloc[-1])
-                    prices[symbol] = round(price, 4)
+                # Primary: intraday delayed price (~15 min delay)
+                price = None
+                try:
+                    price = ticker.fast_info.last_price
+                except Exception:
+                    pass
+                # Fallback: last EOD close from history
+                if not price:
+                    hist = ticker.history(period="2d", auto_adjust=True)
+                    if not hist.empty:
+                        price = float(hist["Close"].iloc[-1])
+                if price:
+                    prices[symbol] = round(float(price), 4)
             except Exception:
                 pass
     except Exception:
