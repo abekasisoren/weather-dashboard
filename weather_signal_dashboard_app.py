@@ -1062,7 +1062,7 @@ anomaly_coverage = df["anomaly_type"].nunique()
 st.title("Global Weather Signal Dashboard")
 st.caption("Early weather intelligence for markets ranked like a trading radar.")
 
-tab_radar, tab_pulse, tab_media = st.tabs(["🌍 Radar", "📊 Pulse Trader", "📡 Media Signals"])
+tab_radar, tab_pulse, tab_media, tab_aftermath = st.tabs(["🌍 Radar", "📊 Pulse Trader", "📡 Media Signals", "📈 Aftermath"])
 
 with tab_radar:
     st.header("📡 Market Radar")
@@ -1255,3 +1255,109 @@ with tab_media:
         .sort_values("Active Signals", ascending=False)
     )
     st.dataframe(coverage_counts, use_container_width=True)
+
+with tab_aftermath:
+    st.header("📈 Aftermath — Recommendation Performance")
+    st.caption("Tracks every stock recommendation made by the Pulse Trader. Log today's picks, then check back to see how they performed.")
+
+    from recommendations_tracker import (
+        ensure_schema, log_recommendations, get_aftermath_table, get_performance_summary
+    )
+
+    # Ensure DB table exists
+    try:
+        ensure_schema()
+    except Exception as e:
+        st.error(f"DB schema error: {e}")
+        st.stop()
+
+    # ── Log today's recommendations ───────────────────────────────────────────
+    st.subheader("Log Today's Recommendations")
+    aftermath_pulse = build_global_pulse_trader_table(filtered.copy())
+
+    col_log, col_log_info = st.columns([1, 4])
+    log_clicked = col_log.button("📌 Log Today's Picks", type="primary")
+
+    _pulse_preview_cols = ["Date", "Stock Trade", "Trade", "Conviction", "Final Trade Score"]
+    _available_preview = [c for c in _pulse_preview_cols if c in aftermath_pulse.columns]
+
+    if not aftermath_pulse.empty:
+        col_log_info.caption(
+            f"**{len(aftermath_pulse[aftermath_pulse['Trade'] != 'No Trade'])}** tradeable recommendations ready to log "
+            f"(entry prices fetched live from Yahoo Finance)"
+        )
+        with st.expander("Preview recommendations to log"):
+            st.dataframe(aftermath_pulse[_available_preview], use_container_width=True)
+    else:
+        col_log_info.caption("No recommendations available with current filters.")
+
+    if log_clicked:
+        if aftermath_pulse.empty:
+            st.warning("No recommendations to log.")
+        else:
+            with st.spinner("Fetching entry prices and logging…"):
+                try:
+                    n = log_recommendations(aftermath_pulse)
+                    if n > 0:
+                        st.success(f"✅ Logged **{n}** new recommendation(s) with live entry prices.")
+                    else:
+                        st.info("All of today's recommendations are already logged.")
+                except Exception as e:
+                    st.error(f"Failed to log: {e}")
+
+    st.divider()
+
+    # ── Load and display aftermath table ─────────────────────────────────────
+    st.subheader("📊 Cumulative Track Record")
+
+    try:
+        with st.spinner("Fetching current prices…"):
+            aftermath_df = get_aftermath_table()
+    except Exception as e:
+        st.error(f"Failed to load aftermath data: {e}")
+        aftermath_df = pd.DataFrame()
+
+    if aftermath_df.empty:
+        st.info("No recommendations logged yet. Click **Log Today's Picks** above to start tracking.")
+    else:
+        # ── Performance metrics ───────────────────────────────────────────────
+        perf = get_performance_summary(aftermath_df)
+        if perf:
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Total Logged", perf["total"])
+            m2.metric("Win Rate", f"{perf['win_rate']}%")
+            m3.metric("Avg P&L", f"{perf['avg_pnl']:+.2f}%")
+            m4.metric("Best Trade", perf["best_trade"])
+            m5.metric("Worst Trade", perf["worst_trade"])
+
+        st.divider()
+
+        # ── Colour-coded P&L table ────────────────────────────────────────────
+        display_cols = ["Date Logged", "Stock", "Trade", "Entry Price",
+                        "Current Price", "P&L %", "Outcome", "Score",
+                        "Conviction", "Region", "Anomaly"]
+
+        visible = aftermath_df[[c for c in display_cols if c in aftermath_df.columns]].copy()
+
+        # Filter controls
+        fc1, fc2, fc3 = st.columns(3)
+        trade_filter = fc1.multiselect("Trade", ["Long", "Short"], default=["Long", "Short"])
+        outcome_filter = fc2.multiselect("Outcome", ["✅ Win", "❌ Loss", "➖ Flat", "—"], default=["✅ Win", "❌ Loss", "➖ Flat", "—"])
+        conviction_vals = sorted(aftermath_df["Conviction"].dropna().unique().tolist())
+        conviction_filter = fc3.multiselect("Conviction", conviction_vals, default=conviction_vals)
+
+        visible = visible[
+            visible["Trade"].isin(trade_filter) &
+            visible["Outcome"].isin(outcome_filter) &
+            visible["Conviction"].isin(conviction_filter)
+        ]
+
+        st.dataframe(visible, use_container_width=True, height=500)
+
+        # ── Why column in expander ────────────────────────────────────────────
+        with st.expander("Show 'Why It Mattered' for all recommendations"):
+            why_cols = ["Date Logged", "Stock", "Trade", "P&L %", "Outcome", "Why"]
+            st.dataframe(
+                aftermath_df[[c for c in why_cols if c in aftermath_df.columns]],
+                use_container_width=True,
+            )
