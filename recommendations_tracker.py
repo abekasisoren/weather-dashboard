@@ -53,6 +53,7 @@ def ensure_schema() -> None:
 def fetch_prices(symbols: list[str]) -> dict[str, Optional[float]]:
     """
     Fetch latest close prices for a list of symbols via yfinance.
+    Uses individual Ticker.history() calls — most reliable method on all platforms.
     Returns {symbol: price} — price is None if fetch fails.
     """
     prices: dict[str, Optional[float]] = {s: None for s in symbols}
@@ -60,17 +61,13 @@ def fetch_prices(symbols: list[str]) -> dict[str, Optional[float]]:
         return prices
     try:
         import yfinance as yf
-        tickers = yf.Tickers(" ".join(symbols))
         for symbol in symbols:
             try:
-                hist = tickers.tickers[symbol].fast_info
-                price = getattr(hist, "last_price", None)
-                if price is None:
-                    # fallback: 1-day history
-                    h = tickers.tickers[symbol].history(period="1d")
-                    if not h.empty:
-                        price = float(h["Close"].iloc[-1])
-                prices[symbol] = round(float(price), 4) if price else None
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="2d", auto_adjust=True)
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+                    prices[symbol] = round(price, 4)
             except Exception:
                 pass
     except Exception:
@@ -178,6 +175,22 @@ def get_aftermath_table() -> pd.DataFrame:
     symbols = df["stock_symbol"].dropna().unique().tolist()
     current_prices = fetch_prices(symbols)
     df["current_price"] = df["stock_symbol"].map(current_prices)
+
+    # Backfill missing entry prices: if entry_price is NULL, use current price as proxy
+    # and persist to DB so future loads have it
+    null_mask = df["entry_price"].isna()
+    if null_mask.any():
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                for idx, row in df[null_mask].iterrows():
+                    bp = current_prices.get(row["stock_symbol"])
+                    if bp is not None:
+                        cur.execute(
+                            "UPDATE recommendations_log SET entry_price = %s WHERE id = %s",
+                            (bp, int(row["id"])),
+                        )
+                        df.at[idx, "entry_price"] = bp
+            conn.commit()
 
     # Compute P&L
     def compute_pnl(row):
