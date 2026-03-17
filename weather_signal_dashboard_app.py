@@ -1261,7 +1261,8 @@ with tab_aftermath:
     st.caption("Tracks every stock recommendation made by the Pulse Trader. Log today's picks, then check back to see how they performed.")
 
     from recommendations_tracker import (
-        ensure_schema, log_recommendations, get_aftermath_table, get_performance_summary
+        ensure_schema, log_recommendations, get_aftermath_table,
+        get_performance_summary, get_fetch_errors,
     )
 
     # Ensure DB table exists
@@ -1335,6 +1336,15 @@ with tab_aftermath:
     qcol2.caption(f"Prices last fetched at **{fetched_at}**. Click to refresh mid-session.")
 
     aftermath_df = st.session_state["aftermath_df"] if st.session_state["aftermath_df"] is not None else pd.DataFrame()
+
+    # ── Price fetch debug info ────────────────────────────────────────────────
+    fetch_errs = get_fetch_errors()
+    if fetch_errs:
+        succeeded = sum(1 for e in fetch_errs if e.startswith("✅") and "crumb" not in e.lower())
+        failed = sum(1 for e in fetch_errs if e.startswith("⛔"))
+        with st.expander(f"🔍 Price fetch debug — {failed} symbol(s) failed, click to inspect"):
+            for line in fetch_errs:
+                st.caption(line)
 
     if aftermath_df.empty:
         st.info("No recommendations logged yet. Click **Log Today's Picks** above to start tracking.")
