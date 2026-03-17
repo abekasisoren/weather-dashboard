@@ -969,6 +969,7 @@ df = read_sql(
         media_headline
     FROM weather_global_shocks
     ORDER BY created_at DESC, signal_level DESC, region ASC, commodity ASC
+
     """
 )
 
@@ -981,6 +982,9 @@ if df.empty:
 for col in ["signal_level", "persistence_score", "severity_score", "market_score"]:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+
+# Normalise anomaly_type casing — eliminates duplicates like "Drought" vs "drought"
+df["anomaly_type"] = df["anomaly_type"].str.lower().str.strip()
 
 df["weather_strength"] = df.apply(compute_weather_strength, axis=1)
 df["trade_display"] = df.apply(infer_trade, axis=1)
@@ -1244,7 +1248,8 @@ with tab_media:
     # ── Anomaly coverage ──────────────────────────────────────────────────────
     st.subheader("Anomaly Coverage")
     coverage_counts = (
-        df.groupby("anomaly_type")
+        df.assign(anomaly_type=df["anomaly_type"].str.lower().str.strip())
+        .groupby("anomaly_type")
         .size()
         .reset_index(name="Active Signals")
         .sort_values("Active Signals", ascending=False)
