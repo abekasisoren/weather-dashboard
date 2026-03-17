@@ -1307,15 +1307,34 @@ with tab_aftermath:
 
     st.divider()
 
-    # ── Load and display aftermath table ─────────────────────────────────────
+    # ── Live quote refresh ────────────────────────────────────────────────────
     st.subheader("📊 Cumulative Track Record")
 
-    try:
-        with st.spinner("Fetching current prices…"):
-            aftermath_df = get_aftermath_table()
-    except Exception as e:
-        st.error(f"Failed to load aftermath data: {e}")
-        aftermath_df = pd.DataFrame()
+    import datetime as _dt
+    _now_str = _dt.datetime.now().strftime("%H:%M:%S")
+
+    qcol1, qcol2 = st.columns([1, 4])
+    fetch_clicked = qcol1.button("🔄 Fetch Quotes Now", type="secondary")
+
+    # Session state: cache table + timestamp so it doesn't re-fetch on every widget interaction
+    if "aftermath_df" not in st.session_state or "aftermath_fetched_at" not in st.session_state:
+        st.session_state["aftermath_df"] = None
+        st.session_state["aftermath_fetched_at"] = None
+
+    # Auto-fetch on first load OR when button clicked
+    if st.session_state["aftermath_df"] is None or fetch_clicked:
+        try:
+            with st.spinner("Fetching live prices from Yahoo Finance…"):
+                st.session_state["aftermath_df"] = get_aftermath_table()
+                st.session_state["aftermath_fetched_at"] = _dt.datetime.now().strftime("%H:%M:%S")
+        except Exception as e:
+            st.error(f"Failed to fetch prices: {e}")
+            st.session_state["aftermath_df"] = pd.DataFrame()
+
+    fetched_at = st.session_state.get("aftermath_fetched_at", "—")
+    qcol2.caption(f"Prices last fetched at **{fetched_at}**. Click to refresh mid-session.")
+
+    aftermath_df = st.session_state["aftermath_df"] or pd.DataFrame()
 
     if aftermath_df.empty:
         st.info("No recommendations logged yet. Click **Log Today's Picks** above to start tracking.")
