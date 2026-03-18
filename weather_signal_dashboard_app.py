@@ -899,59 +899,30 @@ def show_trade_card(row, rank_number=None):
     media_str  = "  📰 CONFIRMED" if media_val is True else ""
     score_pct  = min(int(final_score * 10), 100)
 
-    card_html = f"""
-    <div style="
-        border-left: 3px solid {accent};
-        border-radius: 6px;
-        background: rgba(255,255,255,0.03);
-        padding: 16px 18px 14px 18px;
-        margin-bottom: 2px;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    ">
-        <!-- header row: rank+conviction  |  score -->
-        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
-            <div>
-                <span style="font-size:10px; font-weight:700; color:#888;
-                             letter-spacing:1px; text-transform:uppercase;">
-                    {rank_str}&nbsp;&nbsp;{bucket}{media_str}
-                </span>
-            </div>
-            <div style="text-align:right; line-height:1;">
-                <span style="font-size:26px; font-weight:700; color:white;">{final_score:.1f}</span>
-                <span style="font-size:11px; color:#555;">&thinsp;/10</span>
-            </div>
-        </div>
-
-        <!-- title row -->
-        <div style="font-size:15px; font-weight:600; color:#f0f0f0; margin-bottom:3px;">
-            {region}&nbsp;&nbsp;<span style="color:#555;">·</span>&nbsp;&nbsp;{anomaly}
-        </div>
-
-        <!-- direction + trend -->
-        <div style="font-size:12px; margin-bottom:12px;">
-            <span style="color:{accent}; font-weight:700;">{direction}</span>
-            <span style="color:#444;">&nbsp;&nbsp;·&nbsp;&nbsp;</span>
-            <span style="color:#888;">{trend_label}</span>
-            <span style="color:#444;">&nbsp;&nbsp;·&nbsp;&nbsp;</span>
-            <span style="color:#666;">{commodity}</span>
-        </div>
-
-        <!-- why it matters -->
-        <div style="font-size:12px; color:#aaa; line-height:1.6; margin-bottom:12px;">
-            {why_short}
-        </div>
-
-        <!-- score bar -->
-        <div style="background:#1a1a1a; border-radius:3px; height:3px; margin-bottom:10px;">
-            <div style="background:{accent}; width:{score_pct}%; height:3px; border-radius:3px;"></div>
-        </div>
-
-        <!-- stocks -->
-        <div style="font-size:11px; color:{accent}; font-weight:600; letter-spacing:0.5px; font-family:monospace;">
-            {stocks_str}
-        </div>
-    </div>
-    """
+    card_html = (
+        f'<div style="border-left:3px solid {accent};border-radius:6px;'
+        f'background:rgba(255,255,255,0.03);padding:16px 18px 14px 18px;'
+        f'margin-bottom:2px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
+        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">'
+        f'<span style="font-size:10px;font-weight:700;color:#888;letter-spacing:1px;text-transform:uppercase;">'
+        f'{rank_str}&nbsp;&nbsp;{bucket}{media_str}</span>'
+        f'<div style="text-align:right;line-height:1;">'
+        f'<span style="font-size:26px;font-weight:700;color:white;">{final_score:.1f}</span>'
+        f'<span style="font-size:11px;color:#555;">&thinsp;/10</span></div></div>'
+        f'<div style="font-size:15px;font-weight:600;color:#f0f0f0;margin-bottom:3px;">'
+        f'{region}&nbsp;&nbsp;<span style="color:#555;">·</span>&nbsp;&nbsp;{anomaly}</div>'
+        f'<div style="font-size:12px;margin-bottom:12px;">'
+        f'<span style="color:{accent};font-weight:700;">{direction}</span>'
+        f'<span style="color:#444;">&nbsp;&nbsp;·&nbsp;&nbsp;</span>'
+        f'<span style="color:#888;">{trend_label}</span>'
+        f'<span style="color:#444;">&nbsp;&nbsp;·&nbsp;&nbsp;</span>'
+        f'<span style="color:#666;">{commodity}</span></div>'
+        f'<div style="font-size:12px;color:#aaa;line-height:1.6;margin-bottom:12px;">{why_short}</div>'
+        f'<div style="background:#1a1a1a;border-radius:3px;height:3px;margin-bottom:10px;">'
+        f'<div style="background:{accent};width:{score_pct}%;height:3px;border-radius:3px;"></div></div>'
+        f'<div style="font-size:11px;color:{accent};font-weight:600;letter-spacing:0.5px;font-family:monospace;">'
+        f'{stocks_str}</div></div>'
+    )
     st.markdown(card_html, unsafe_allow_html=True)
 
     with st.expander("Details & score breakdown"):
