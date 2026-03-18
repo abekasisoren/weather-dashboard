@@ -1,5 +1,6 @@
 from ecmwf.opendata import Client
 from datetime import datetime, timedelta, timezone
+import signal
 import time
 import random
 import xarray as xr
@@ -7,11 +8,15 @@ import pandas as pd
 import numpy as np
 
 # ─── Download config ──────────────────────────────────────────────────────────
-MIN_RUNS_REQUIRED    = 2          # proceed with at least this many successful downloads
-TARGET_RUNS          = 5          # ideal number of historical runs
-MAX_RETRIES_PER_SRC  = 2          # attempts per source before trying the next mirror
-RETRY_DELAY          = 20         # seconds to wait before a same-source retry
-INTER_DOWNLOAD_DELAY = (8, 15)    # random pause between successful downloads
+MIN_RUNS_REQUIRED    = 2    # proceed with at least this many successful downloads
+TARGET_RUNS          = 5    # ideal number of historical runs
+MAX_RETRIES_PER_SRC  = 1    # attempts per source (1 = try once, then switch mirror)
+RETRIEVE_TIMEOUT     = 75   # hard deadline per attempt (seconds).
+                             # A file is ~18 MB; at 750 kB/s that's ~25 s.
+                             # 75 s is generous, yet well under the library's
+                             # own 120 s wait-and-retry cycle — so SIGALRM fires
+                             # before the library sleeps, forcing our source switch.
+INTER_DOWNLOAD_DELAY = (5, 10)  # random pause between successful downloads
 
 # ECMWF open data is mirrored on 4 independent endpoints.
 # Source order: prefer ECMWF's own CDN first (fewest public parallel connections),
@@ -27,78 +32,91 @@ _SOURCES = [
 
 
 def _is_throttle_error(exc: Exception) -> bool:
-    """
-    Detect rate-limit / service-overload errors regardless of how the HTTP
-    client formats the status code.
-
-    ecmwf.opendata (via requests) formats 503 as:
-        '503 Server Error: Slow Down for url: ...'
-    Raw S3/CDN XML responses contain:
-        '<Code>SlowDown</Code>'
-    """
+    """Detect rate-limit / service-overload responses from any mirror."""
     err = str(exc).lower()
     return (
-        "slow down" in err               # requests format: "Slow Down"
-        or "slowdown" in err             # XML format: "SlowDown"
+        "slow down" in err               # requests: "503 Server Error: Slow Down"
+        or "slowdown" in err             # S3 XML: "<Code>SlowDown</Code>"
         or "reduce your request rate" in err
         or ("503" in err and "server error" in err)
         or "429" in err                  # Too Many Requests
         or "service unavailable" in err  # generic 503 text
+        or "too many requests" in err    # explicit text form of 429
     )
 
 
-def _retrieve_one(client_obj: "Client", date_str: str, hh: int, filename: str) -> None:
-    """Single retrieve call — raises on any error."""
-    client_obj.retrieve(
-        date=int(date_str),
-        time=hh,
-        stream="oper",
-        type="fc",
-        step=[24, 48, 72, 96, 120],
-        param=["2t", "tp", "10u", "10v", "msl"],
-        target=filename,
-    )
+def _retrieve_timed(client_obj: "Client", date_str: str, hh: int, filename: str) -> None:
+    """
+    Call client.retrieve() with a SIGALRM hard deadline.
+
+    The ecmwf.opendata library has a built-in retry loop (up to 500 × 120 s)
+    that swallows 429/503 exceptions internally before we ever see them.
+    SIGALRM fires after RETRIEVE_TIMEOUT seconds regardless of what the library
+    is doing (including sleeping between its own retries), raising TimeoutError
+    in the main thread and letting our source-switching logic take over.
+
+    SIGALRM is available on Linux/macOS (i.e. Render's environment).
+    """
+    def _alarm_handler(signum, frame):
+        raise TimeoutError(
+            f"retrieve timed out after {RETRIEVE_TIMEOUT}s — switching mirror"
+        )
+
+    old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(RETRIEVE_TIMEOUT)
+    try:
+        client_obj.retrieve(
+            date=int(date_str),
+            time=hh,
+            stream="oper",
+            type="fc",
+            step=[24, 48, 72, 96, 120],
+            param=["2t", "tp", "10u", "10v", "msl"],
+            target=filename,
+        )
+    finally:
+        signal.alarm(0)                          # cancel alarm on success or any exception
+        signal.signal(signal.SIGALRM, old_handler)  # restore previous handler
 
 
 def retrieve_with_backoff(date_str: str, hh: int, filename: str) -> bool:
     """
     Download one ECMWF GRIB file, trying each mirror in turn.
 
-    On throttle / 503: give the same source one quick retry (RETRY_DELAY s),
-    then immediately move on to the next mirror.  This avoids the ecmwf
-    library's built-in 120 s × 500 attempts loop on the same choked endpoint.
+    Uses a SIGALRM hard timeout so that if the ecmwf library's internal
+    retry loop holds the thread for more than RETRIEVE_TIMEOUT seconds,
+    we forcibly abandon that source and move to the next mirror.
 
-    On non-throttle errors (date not yet published, bad response): skip that
-    source immediately and try the next — retrying won't help.
+    Mirror order: ecmwf (CDN) → azure → google → aws.
+    AWS is tried last because it attracts the most public traffic and is
+    most likely to be rate-limited at busy times.
 
     Returns True on first successful download, False when all sources fail.
     """
     for src_name, client_obj in _SOURCES:
-        for attempt in range(MAX_RETRIES_PER_SRC):
-            try:
-                _retrieve_one(client_obj, date_str, hh, filename)
-                print(f"  ✓ {date_str}/{hh:02d}h — {src_name.upper()}")
-                return True
+        print(f"    trying {src_name.upper()} …", flush=True)
+        try:
+            _retrieve_timed(client_obj, date_str, hh, filename)
+            print(f"  ✓ {date_str}/{hh:02d}h — {src_name.upper()}")
+            return True
 
-            except Exception as exc:
-                if _is_throttle_error(exc):
-                    if attempt < MAX_RETRIES_PER_SRC - 1:
-                        print(
-                            f"  [{src_name.upper()}] Throttled {date_str}/{hh:02d}h, "
-                            f"quick retry in {RETRY_DELAY}s …"
-                        )
-                        time.sleep(RETRY_DELAY + random.uniform(0, 5))
-                    else:
-                        print(
-                            f"  [{src_name.upper()}] Still throttled — switching mirror"
-                        )
-                else:
-                    # Not a throttle — date unavailable / parse error; skip this source
-                    print(
-                        f"  [{src_name.upper()}] {date_str}/{hh:02d}h unavailable: "
-                        f"{str(exc)[:120]}"
-                    )
-                    break  # move to next source immediately
+        except TimeoutError as exc:
+            print(f"  [{src_name.upper()}] {exc} — trying next mirror")
+
+        except Exception as exc:
+            if _is_throttle_error(exc):
+                print(
+                    f"  [{src_name.upper()}] Throttle error on {date_str}/{hh:02d}h "
+                    f"— trying next mirror"
+                )
+            else:
+                # Non-throttle: date not published yet, parse error, etc.
+                print(
+                    f"  [{src_name.upper()}] {date_str}/{hh:02d}h unavailable: "
+                    f"{str(exc)[:120]}"
+                )
+                # Still try remaining mirrors — they might have the data at a
+                # different path or different freshness window
 
     print(f"  ✗ {date_str}/{hh:02d}h — all 4 mirrors failed, skipping")
     return False
