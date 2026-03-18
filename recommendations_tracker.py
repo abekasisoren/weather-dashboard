@@ -62,88 +62,30 @@ def get_fetch_errors() -> list[str]:
     return list(_fetch_errors)
 
 
-def _yahoo_crumb_session():
+_FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "")
+
+
+def _finnhub_price(symbol: str, api_key: str) -> Optional[float]:
     """
-    Obtain Yahoo Finance crumb + cookie jar needed for authenticated API calls.
-    Required since late 2023 — unauthenticated requests return 401.
-    Returns (opener, crumb) or raises on failure.
+    Fetch current price from Finnhub (~15-min delayed).
+    Finnhub works from any cloud IP — no 429 rate-limit issues.
+    Free tier: 60 calls/min.  Sign up at https://finnhub.io
     """
-    import http.cookiejar
-    import urllib.parse
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-
-    # Step 1: seed the cookie jar
-    try:
-        req = urllib.request.Request("https://fc.yahoo.com", headers=headers)
-        opener.open(req, timeout=8)
-    except Exception:
-        pass  # just seeding — failure is ok
-
-    # Step 2: get crumb
-    crumb_req = urllib.request.Request(
-        "https://query2.finance.yahoo.com/v1/test/getcrumb",
-        headers=headers,
-    )
-    with opener.open(crumb_req, timeout=8) as resp:
-        crumb = resp.read().decode().strip()
-
-    return opener, crumb
-
-
-def _yahoo_direct(symbol: str, opener=None, crumb: str = "") -> Optional[float]:
-    """
-    Hit Yahoo Finance chart API directly with crumb + cookie auth.
-    Returns regularMarketPrice (~15-min delayed) or previousClose.
-    """
-    import urllib.parse
-
-    params = "interval=1d&range=2d&includePrePost=false"
-    if crumb:
-        params += f"&crumb={urllib.parse.quote(crumb)}"
-
-    url = (
-        f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?{params}"
-    )
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        fetch = opener.open(req, timeout=10) if opener else urllib.request.urlopen(req, timeout=10)
-        with fetch as resp:
-            data = json.loads(resp.read().decode())
-        meta = data["chart"]["result"][0]["meta"]
-        price = meta.get("regularMarketPrice") or meta.get("previousClose")
-        return round(float(price), 4) if price else None
-    except Exception as e:
-        raise RuntimeError(f"yahoo_direct HTTP error: {e}") from e
+    url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={api_key}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode())
+    price = data.get("c")  # 'c' = current price
+    if price and float(price) > 0:
+        return round(float(price), 4)
+    return None
 
 
 def fetch_prices(symbols: list[str]) -> dict[str, Optional[float]]:
     """
     Fetch latest prices (~15-min delayed intraday) for a list of symbols.
-    Tier 1: Yahoo Finance chart API with crumb auth (works on cloud hosts)
-    Tier 2: yfinance fast_info.last_price
-    Tier 3: yfinance history(period="2d")
-    Returns {symbol: price} — price is None if all tiers fail.
-    Errors are captured in module-level _fetch_errors for dashboard display.
+    Uses Finnhub API — requires FINNHUB_API_KEY env var (free at finnhub.io).
+    Errors captured in _fetch_errors for dashboard debug display.
     """
     global _fetch_errors
     _fetch_errors = []
@@ -152,45 +94,25 @@ def fetch_prices(symbols: list[str]) -> dict[str, Optional[float]]:
     if not symbols:
         return prices
 
-    # Get crumb once for all symbols
-    opener, crumb = None, ""
-    try:
-        opener, crumb = _yahoo_crumb_session()
-        _fetch_errors.append(f"✅ Yahoo crumb obtained: {crumb[:8]}…")
-    except Exception as e:
-        _fetch_errors.append(f"⚠️ Crumb fetch failed: {e}")
+    api_key = os.environ.get("FINNHUB_API_KEY", "")
+    if not api_key:
+        _fetch_errors.append(
+            "⚠️ FINNHUB_API_KEY not set. "
+            "Get a free key at https://finnhub.io and add it as a Render env var."
+        )
+        return prices
 
+    _fetch_errors.append(f"✅ Finnhub key found, fetching {len(symbols)} symbols…")
     for symbol in symbols:
-        price = None
-
-        # Tier 1 — direct Yahoo API with crumb
         try:
-            price = _yahoo_direct(symbol, opener=opener, crumb=crumb)
+            price = _finnhub_price(symbol, api_key)
+            if price:
+                prices[symbol] = price
+                _fetch_errors.append(f"✅ {symbol}: ${price}")
+            else:
+                _fetch_errors.append(f"⛔ {symbol}: Finnhub returned 0 / no price")
         except Exception as e:
-            _fetch_errors.append(f"❌ Tier1 {symbol}: {e}")
-
-        # Tier 2 — yfinance fast_info
-        if not price:
-            try:
-                import yfinance as yf
-                price = yf.Ticker(symbol).fast_info.last_price
-            except Exception as e:
-                _fetch_errors.append(f"❌ Tier2 {symbol}: {e}")
-
-        # Tier 3 — yfinance history
-        if not price:
-            try:
-                import yfinance as yf
-                hist = yf.Ticker(symbol).history(period="2d", auto_adjust=True)
-                if not hist.empty:
-                    price = float(hist["Close"].iloc[-1])
-            except Exception as e:
-                _fetch_errors.append(f"❌ Tier3 {symbol}: {e}")
-
-        if price:
-            prices[symbol] = round(float(price), 4)
-        else:
-            _fetch_errors.append(f"⛔ All tiers failed: {symbol}")
+            _fetch_errors.append(f"❌ {symbol}: {e}")
 
     return prices
 
