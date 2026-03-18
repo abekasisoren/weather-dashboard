@@ -119,10 +119,37 @@ def fetch_prices(symbols: list[str]) -> dict[str, Optional[float]]:
 
 # ─── Log recommendations ──────────────────────────────────────────────────────
 
+def get_recently_recommended_combos(hours: int = 24) -> set[tuple[str, str, str]]:
+    """
+    Return set of (stock_symbol, region, anomaly) tuples logged in the last N hours.
+    Used by the dashboard to show cooldown badges and suppress repeat logging.
+    """
+    if not DATABASE_URL:
+        return set()
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT stock_symbol,
+                           COALESCE(region, ''),
+                           COALESCE(anomaly, '')
+                    FROM recommendations_log
+                    WHERE logged_at >= NOW() - INTERVAL '1 hour' * %s
+                    """,
+                    (hours,),
+                )
+                return {(r[0], r[1], r[2]) for r in cur.fetchall()}
+    except Exception:
+        return set()
+
+
 def log_recommendations(pulse_df: pd.DataFrame) -> int:
     """
     Log current pulse trader recommendations to recommendations_log.
-    Only logs symbols not already logged today (idempotent per day).
+    Cooldown rule: skips any (symbol, region, anomaly) combination already
+    logged within the last 24 hours — same stock can only be recommended
+    for the same weather event once per day.
     Returns number of rows inserted.
     """
     if pulse_df.empty:
@@ -134,20 +161,19 @@ def log_recommendations(pulse_df: pd.DataFrame) -> int:
     symbols = pulse_df["Stock Trade"].dropna().unique().tolist()
     prices = fetch_prices(symbols)
 
-    # Check which symbols already logged today
-    with psycopg.connect(DATABASE_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT stock_symbol FROM recommendations_log WHERE signal_date = %s",
-                (today,),
-            )
-            already_logged = {row[0] for row in cur.fetchall()}
+    # Cooldown: fetch (symbol, region, anomaly) combos logged in last 24h
+    already_logged = get_recently_recommended_combos(hours=24)
 
     rows_to_insert = []
     for _, row in pulse_df.iterrows():
         symbol = str(row.get("Stock Trade", "")).strip()
-        trade = str(row.get("Trade", "")).strip()
-        if not symbol or trade == "No Trade" or symbol in already_logged:
+        trade  = str(row.get("Trade", "")).strip()
+        region = str(row.get("Region", "")).strip()
+        anomaly = str(row.get("Anomaly", "")).strip()
+        if not symbol or trade == "No Trade":
+            continue
+        # 24-hour cooldown: skip if this (symbol, region, anomaly) was already logged
+        if (symbol, region, anomaly) in already_logged:
             continue
 
         rows_to_insert.append({

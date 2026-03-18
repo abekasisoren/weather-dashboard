@@ -686,11 +686,17 @@ def compute_conflict_cleanliness(long_score: int, short_score: int) -> float:
 
 
 def compute_confluence_bonus(df: pd.DataFrame, anomaly_type: str) -> float:
-    """Bonus for same anomaly type appearing in multiple regions simultaneously."""
-    count = int((df["anomaly_type"] == anomaly_type).sum())
-    if count >= 3:
+    """
+    Bonus for same anomaly type appearing in multiple DISTINCT regions simultaneously.
+    Counts unique regions, not rows — prevents commodity-row inflation from
+    inflating the bonus when the same region just has multiple commodities.
+    """
+    region_count = int(
+        df[df["anomaly_type"] == anomaly_type]["region"].nunique()
+    )
+    if region_count >= 3:
         return 1.0
-    if count == 2:
+    if region_count == 2:
         return 0.5
     return 0.0
 
@@ -963,11 +969,22 @@ def build_ranked_trade_table(df: pd.DataFrame) -> pd.DataFrame:
     return ranked_df
 
 
-def show_weather_event_card(event_rows: "pd.DataFrame", rank_number: int, all_df: "pd.DataFrame"):
+def show_weather_event_card(
+    event_rows: "pd.DataFrame",
+    rank_number: int,
+    all_df: "pd.DataFrame",
+    owned_symbols: "set | None" = None,
+    cooldown_combos: "set | None" = None,
+):
     """
     Radar card focused on the weather EVENT (region + anomaly type).
     Shows all affected equities across every commodity in the event group,
     ranked by their individual trading scores.
+
+    owned_symbols  — if provided, only stocks in this set are shown (cross-event
+                     ownership: each stock appears in only its highest-scoring event).
+    cooldown_combos — set of (symbol, region, anomaly) tuples logged in last 24h;
+                      matching stocks get a 🔁 COOLDOWN badge.
     """
     best_row = event_rows.sort_values("signal_level", ascending=False).iloc[0]
 
@@ -976,6 +993,8 @@ def show_weather_event_card(event_rows: "pd.DataFrame", rank_number: int, all_df
     anomaly   = anomaly_raw.replace("_", " ").title()
     trend_dir = normalize_text(best_row.get("trend_direction", ""), "new")
     media_val = best_row.get("media_validated")
+    region_raw  = normalize_text(best_row.get("region", ""), "").strip()
+    anomaly_key_raw = anomaly_raw.strip()
 
     # Weather-level scoring (shared by all stocks in this event)
     weather_strength  = compute_weather_strength(best_row)
@@ -985,7 +1004,7 @@ def show_weather_event_card(event_rows: "pd.DataFrame", rank_number: int, all_df
     anomaly_key       = normalize_anomaly_key(anomaly_raw)
     conf_bonus        = compute_confluence_bonus(all_df, anomaly_key)
 
-    # Collect ALL affected stocks across every commodity row in this event
+    # Collect affected stocks — respecting cross-event ownership filter
     stock_list = []
     seen_symbols: set = set()
     for _, row in event_rows.iterrows():
@@ -995,6 +1014,9 @@ def show_weather_event_card(event_rows: "pd.DataFrame", rank_number: int, all_df
         commodity_label = normalize_text(row.get("commodity", ""), "")
         for sym in symbols:
             if sym in seen_symbols:
+                continue
+            # Cross-event ownership: skip if this symbol belongs to a higher-scoring event
+            if owned_symbols is not None and sym not in owned_symbols:
                 continue
             seen_symbols.add(sym)
             mq = compute_mapping_quality(row, sym, trade)
@@ -1011,12 +1033,18 @@ def show_weather_event_card(event_rows: "pd.DataFrame", rank_number: int, all_df
             )
             candidate = get_symbol_candidate(row, sym, trade.lower()) or {}
             role = candidate.get("role", commodity_label).replace("_", " ")
+            # Cooldown check: was this (symbol, region, anomaly) logged in last 24h?
+            on_cooldown = (
+                cooldown_combos is not None
+                and (sym, region_raw, anomaly_key_raw) in cooldown_combos
+            )
             stock_list.append({
                 "symbol": sym,
                 "direction": trade,
                 "score": round(score, 1),
                 "role": role,
                 "commodity": commodity_label,
+                "cooldown": on_cooldown,
             })
 
     # Sort stocks by score descending
@@ -1061,15 +1089,25 @@ def show_weather_event_card(event_rows: "pd.DataFrame", rank_number: int, all_df
     # Build individual stock rows
     stock_rows_html = ""
     for s in stock_list[:10]:
-        d_color = "#2ECC71" if s["direction"] == "Long" else "#E74C3C"
-        d_arrow = "▲" if s["direction"] == "Long" else "▼"
+        d_color  = "#2ECC71" if s["direction"] == "Long" else "#E74C3C"
+        d_arrow  = "▲" if s["direction"] == "Long" else "▼"
+        # Cooldown indicator: greyed out with 🔁 when same (sym+region+anomaly) was logged <24h ago
+        if s.get("cooldown"):
+            sym_color  = "#555"
+            score_color = "#444"
+            cd_badge   = '<span style="font-size:9px;color:#444;margin-left:4px;">🔁</span>'
+        else:
+            sym_color  = "#f0f0f0"
+            score_color = d_color
+            cd_badge   = ""
         stock_rows_html += (
             f'<div style="display:flex;align-items:center;gap:8px;padding:3px 0;'
             f'border-bottom:1px solid rgba(255,255,255,0.04);">'
             f'<span style="color:{d_color};font-size:10px;font-weight:900;width:12px;flex-shrink:0;">{d_arrow}</span>'
-            f'<span style="font-family:monospace;font-size:12px;font-weight:700;color:#f0f0f0;width:48px;flex-shrink:0;">{s["symbol"]}</span>'
-            f'<span style="font-size:11px;font-weight:700;color:{d_color};width:28px;flex-shrink:0;">{s["score"]:.1f}</span>'
+            f'<span style="font-family:monospace;font-size:12px;font-weight:700;color:{sym_color};width:48px;flex-shrink:0;">{s["symbol"]}</span>'
+            f'<span style="font-size:11px;font-weight:700;color:{score_color};width:28px;flex-shrink:0;">{s["score"]:.1f}</span>'
             f'<span style="font-size:10px;color:#555;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">{s["role"]}</span>'
+            f'{cd_badge}'
             f'</div>'
         )
 
@@ -1312,14 +1350,47 @@ with tab_radar:
                 deduped.append((_score, _grp))
         event_groups = deduped[:top_n]
 
-        # Render 2-column grid of weather-event cards
+        # ── Cross-event symbol ownership ──────────────────────────────────────
+        # Each stock symbol is "owned" by the event where it scores highest.
+        # This prevents the same stock from cluttering multiple cards when it
+        # is triggered by the same anomaly type across many regions.
+        symbol_event_owner: dict[str, int] = {}  # symbol -> event index
+        for ei, (evt_score, grp) in enumerate(event_groups):
+            for _, _row in grp.iterrows():
+                _, syms = get_stock_trade_symbols(_row)
+                for _sym in syms:
+                    if _sym not in symbol_event_owner or evt_score > event_groups[symbol_event_owner[_sym]][0]:
+                        symbol_event_owner[_sym] = ei
+
+        event_owned_symbols: list[set] = [set() for _ in event_groups]
+        for _sym, ei in symbol_event_owner.items():
+            event_owned_symbols[ei].add(_sym)
+
+        # ── Load 24h cooldown combos (cached in session to avoid repeated DB hits) ──
+        if "cooldown_combos" not in st.session_state:
+            try:
+                from recommendations_tracker import get_recently_recommended_combos
+                st.session_state["cooldown_combos"] = get_recently_recommended_combos(hours=24)
+            except Exception:
+                st.session_state["cooldown_combos"] = set()
+        _cooldown_combos = st.session_state.get("cooldown_combos", set())
+
+        # ── Render 2-column grid of weather-event cards ────────────────────────
         for i in range(0, len(event_groups), 2):
             col_l, col_r = st.columns(2, gap="medium")
             with col_l:
-                show_weather_event_card(event_groups[i][1], rank_number=i + 1, all_df=filtered)
+                show_weather_event_card(
+                    event_groups[i][1], rank_number=i + 1, all_df=filtered,
+                    owned_symbols=event_owned_symbols[i],
+                    cooldown_combos=_cooldown_combos,
+                )
             if i + 1 < len(event_groups):
                 with col_r:
-                    show_weather_event_card(event_groups[i + 1][1], rank_number=i + 2, all_df=filtered)
+                    show_weather_event_card(
+                        event_groups[i + 1][1], rank_number=i + 2, all_df=filtered,
+                        owned_symbols=event_owned_symbols[i + 1],
+                        cooldown_combos=_cooldown_combos,
+                    )
 
     # ── Ranking table (collapsed by default) ──────────────────────────────────
     with st.expander("📊 Full Ranking Table"):
