@@ -595,6 +595,61 @@ def compute_trend_factor(row) -> float:
     return mapping.get(trend, 5.0)
 
 
+# ─── Z-Score normalization ────────────────────────────────────────────────────
+# Maps raw signal_level (1-9) to approximate σ deviations from climatological norm
+# Professional meteorological convention: 1σ ≈ notable, 2σ ≈ rare, 3σ ≈ extreme
+_SIGNAL_LEVEL_TO_SIGMA: dict[int, float] = {
+    1: 0.5,   # Marginal anomaly
+    2: 0.8,   # Weak signal
+    3: 1.0,   # Moderate (1σ)
+    4: 1.2,   # Above moderate
+    5: 1.5,   # Notable anomaly
+    6: 1.8,   # Significant (approaching 2σ)
+    7: 2.2,   # Strong anomaly (2σ+)
+    8: 2.6,   # Severe anomaly
+    9: 3.0,   # Extreme event (3σ — very rare)
+}
+
+
+def compute_anomaly_zscore(row) -> float:
+    """
+    Convert signal_level to a Z-score (σ from climatological mean).
+    Adjusts for seasonality: off-season events have higher true anomaly σ
+    because the baseline climatology is already biased toward calm conditions.
+    Returns sigma value (typically 0.5 – 3.5).
+    """
+    signal = safe_int(row.get("signal_level"))
+    base_sigma = _SIGNAL_LEVEL_TO_SIGMA.get(signal, 1.0)
+
+    # Seasonality adjustment: off-season anomalies are climatologically rarer
+    season_score = compute_seasonality_score(row)
+    if season_score >= 8.0:      # Off-season — true sigma is materially higher
+        sigma_multiplier = 1.40
+    elif season_score >= 5.5:    # Fringe season — mild boost
+        sigma_multiplier = 1.15
+    else:                        # Peak season — already priced in, sigma as-is
+        sigma_multiplier = 1.00
+
+    return round(base_sigma * sigma_multiplier, 2)
+
+
+def _zscore_to_weather_boost(sigma: float) -> float:
+    """
+    Convert Z-score (σ) to a weather strength multiplier.
+    1σ = neutral (1.0×), 3σ = +35% boost, <0.5σ = −35% penalty.
+    Uses a linear interpolation scheme (pragmatic approximation of hedge-fund
+    exponential weighting — keeps scores interpretable on the 0-10 scale).
+    """
+    sigma = max(0.3, min(sigma, 3.5))
+    if sigma <= 1.0:
+        boost = 0.65 + (sigma - 0.3) / (1.0 - 0.3) * 0.35
+    elif sigma <= 2.0:
+        boost = 1.00 + (sigma - 1.0) / (2.0 - 1.0) * 0.20
+    else:
+        boost = 1.20 + (sigma - 2.0) / (3.5 - 2.0) * 0.15
+    return round(boost, 3)
+
+
 def compute_edge_score(row) -> float:
     """Score 0-10: inverse of media validation.
     Unvalidated signal = maximum alpha (market hasn't priced it yet).
@@ -608,7 +663,116 @@ def compute_edge_score(row) -> float:
     return 7.0        # Unknown / not yet checked — assume moderate edge
 
 
+# ─── Phenological timing calendar ────────────────────────────────────────────
+# Maps (commodity, anomaly_type) → {month: sensitivity_multiplier}
+# 2.0 = critical crop stage (maximum market impact)
+# 1.0 = neutral impact
+# 0.3 = dormancy / off-season (minimal impact)
+# Source: professional agricultural trading desk phenological calendars
+_PHENO_CALENDAR: dict[tuple[str, str], dict[int, float]] = {
+    # CORN (US Midwest: planted Apr-May, pollinates Jul, harvests Sep-Oct)
+    ("corn", "drought"):    {1: 0.2, 2: 0.2, 3: 0.3, 4: 0.6, 5: 0.9, 6: 1.4, 7: 2.0, 8: 1.7, 9: 1.1, 10: 0.5, 11: 0.2, 12: 0.2},
+    ("corn", "heatwave"):   {1: 0.1, 2: 0.1, 3: 0.2, 4: 0.5, 5: 0.8, 6: 1.3, 7: 2.0, 8: 1.6, 9: 0.9, 10: 0.4, 11: 0.1, 12: 0.1},
+    ("corn", "frost"):      {1: 0.3, 2: 0.3, 3: 0.8, 4: 1.6, 5: 2.0, 6: 1.2, 7: 0.4, 8: 0.4, 9: 1.5, 10: 1.8, 11: 0.3, 12: 0.3},
+    ("corn", "heavy_rain"): {1: 0.2, 2: 0.2, 3: 0.5, 4: 1.2, 5: 1.8, 6: 1.0, 7: 0.8, 8: 0.7, 9: 0.6, 10: 0.4, 11: 0.2, 12: 0.2},
+    # SOYBEANS (planted May-Jun, pod-fills Aug, harvests Sep-Oct)
+    ("soybeans", "drought"):  {1: 0.2, 2: 0.2, 3: 0.2, 4: 0.4, 5: 0.7, 6: 1.2, 7: 1.7, 8: 2.0, 9: 1.3, 10: 0.6, 11: 0.2, 12: 0.2},
+    ("soybeans", "heatwave"): {1: 0.1, 2: 0.1, 3: 0.2, 4: 0.4, 5: 0.6, 6: 1.1, 7: 1.6, 8: 2.0, 9: 1.2, 10: 0.5, 11: 0.1, 12: 0.1},
+    ("soybeans", "frost"):    {1: 0.2, 2: 0.2, 3: 0.6, 4: 1.8, 5: 2.0, 6: 0.8, 7: 0.3, 8: 0.3, 9: 1.3, 10: 1.7, 11: 0.2, 12: 0.2},
+    # WHEAT (winter: planted Oct, vernalises Dec-Feb, heads May-Jun, harvests Jul)
+    ("wheat", "drought"):   {1: 0.7, 2: 0.8, 3: 1.3, 4: 1.6, 5: 2.0, 6: 1.8, 7: 0.5, 8: 1.2, 9: 0.6, 10: 1.1, 11: 1.0, 12: 0.8},
+    ("wheat", "frost"):     {1: 1.0, 2: 1.2, 3: 1.8, 4: 2.0, 5: 1.5, 6: 0.4, 7: 0.3, 8: 0.4, 9: 0.8, 10: 1.5, 11: 1.3, 12: 1.0},
+    ("wheat", "heatwave"):  {1: 0.4, 2: 0.5, 3: 0.9, 4: 1.4, 5: 2.0, 6: 1.7, 7: 0.5, 8: 0.9, 9: 0.4, 10: 0.5, 11: 0.4, 12: 0.4},
+    ("wheat", "cold_wave"): {1: 1.2, 2: 1.4, 3: 1.8, 4: 2.0, 5: 0.8, 6: 0.3, 7: 0.2, 8: 0.3, 9: 0.6, 10: 1.3, 11: 1.2, 12: 1.1},
+    # COFFEE (Brazil: flowering Aug-Sep, cherry develops Oct-Apr, harvest May-Aug)
+    ("coffee", "drought"):  {1: 0.7, 2: 0.7, 3: 0.6, 4: 0.8, 5: 1.2, 6: 1.6, 7: 2.0, 8: 1.9, 9: 1.5, 10: 0.9, 11: 0.7, 12: 0.7},
+    ("coffee", "frost"):    {1: 0.8, 2: 0.9, 3: 0.7, 4: 0.5, 5: 1.0, 6: 1.8, 7: 2.0, 8: 1.7, 9: 1.0, 10: 0.6, 11: 0.6, 12: 0.7},
+    ("coffee", "heatwave"): {1: 0.5, 2: 0.5, 3: 0.6, 4: 0.8, 5: 1.0, 6: 1.3, 7: 1.7, 8: 2.0, 9: 1.6, 10: 0.9, 11: 0.6, 12: 0.5},
+    # COCOA (West Africa: main harvest Oct-Mar, mid-crop Apr-Sep)
+    ("cocoa", "drought"):    {1: 0.8, 2: 0.7, 3: 0.7, 4: 1.0, 5: 1.3, 6: 1.6, 7: 2.0, 8: 1.8, 9: 1.5, 10: 0.9, 11: 0.8, 12: 0.8},
+    ("cocoa", "heavy_rain"): {1: 1.0, 2: 0.9, 3: 1.2, 4: 1.5, 5: 1.8, 6: 1.4, 7: 0.8, 8: 0.7, 9: 0.9, 10: 1.6, 11: 1.3, 12: 1.0},
+    # NATURAL GAS (demand-driven by temperature extremes, not a crop)
+    ("natural gas", "polar_vortex"): {1: 2.0, 2: 1.8, 3: 1.0, 4: 0.5, 5: 0.3, 6: 0.3, 7: 0.4, 8: 0.4, 9: 0.5, 10: 0.8, 11: 1.4, 12: 1.9},
+    ("natural gas", "cold_wave"):    {1: 1.9, 2: 1.7, 3: 1.1, 4: 0.6, 5: 0.3, 6: 0.3, 7: 0.3, 8: 0.4, 9: 0.5, 10: 0.9, 11: 1.5, 12: 1.8},
+    ("natural gas", "heatwave"):     {1: 0.3, 2: 0.3, 3: 0.5, 4: 0.7, 5: 1.0, 6: 1.5, 7: 2.0, 8: 1.8, 9: 1.2, 10: 0.6, 11: 0.4, 12: 0.3},
+    ("natural gas", "ice_storm"):    {1: 1.8, 2: 1.6, 3: 0.9, 4: 0.4, 5: 0.3, 6: 0.3, 7: 0.3, 8: 0.3, 9: 0.4, 10: 0.7, 11: 1.3, 12: 1.7},
+    # SUGAR (Brazil: planting Dec-Jan, crush Apr-Nov)
+    ("sugar", "drought"): {1: 0.6, 2: 0.7, 3: 0.9, 4: 1.3, 5: 1.6, 6: 1.8, 7: 2.0, 8: 1.9, 9: 1.5, 10: 1.1, 11: 0.7, 12: 0.6},
+    ("sugar", "frost"):   {1: 0.5, 2: 0.5, 3: 0.6, 4: 0.8, 5: 1.0, 6: 1.4, 7: 1.8, 8: 1.6, 9: 1.1, 10: 0.7, 11: 0.5, 12: 0.5},
+    # COTTON (planted Apr-May, boll sets Jul-Aug, harvests Sep-Oct)
+    ("cotton", "drought"):  {1: 0.3, 2: 0.3, 3: 0.5, 4: 0.8, 5: 1.2, 6: 1.6, 7: 2.0, 8: 1.9, 9: 1.4, 10: 0.8, 11: 0.4, 12: 0.3},
+    ("cotton", "heatwave"): {1: 0.2, 2: 0.2, 3: 0.4, 4: 0.7, 5: 1.1, 6: 1.5, 7: 2.0, 8: 1.8, 9: 1.2, 10: 0.6, 11: 0.3, 12: 0.2},
+    # RICE (SE Asia: transplant Apr-Jun, grain-fill Aug, harvest Sep-Nov)
+    ("rice", "monsoon_failure"): {1: 0.3, 2: 0.3, 3: 0.5, 4: 1.0, 5: 1.5, 6: 2.0, 7: 2.0, 8: 1.8, 9: 1.5, 10: 1.0, 11: 0.5, 12: 0.3},
+    ("rice", "drought"):         {1: 0.4, 2: 0.4, 3: 0.6, 4: 1.0, 5: 1.5, 6: 2.0, 7: 1.9, 8: 1.7, 9: 1.3, 10: 0.8, 11: 0.4, 12: 0.4},
+    ("rice", "flood_risk"):      {1: 0.5, 2: 0.5, 3: 0.6, 4: 0.9, 5: 1.4, 6: 1.8, 7: 2.0, 8: 1.8, 9: 1.4, 10: 1.0, 11: 0.5, 12: 0.5},
+    # PALM OIL (SE Asia: year-round, peak yield Jul-Sep)
+    ("palm oil", "drought"):         {1: 0.6, 2: 0.6, 3: 0.7, 4: 0.8, 5: 1.0, 6: 1.2, 7: 1.8, 8: 2.0, 9: 1.8, 10: 1.2, 11: 0.7, 12: 0.6},
+    ("palm oil", "monsoon_failure"): {1: 0.5, 2: 0.5, 3: 0.6, 4: 0.8, 5: 1.2, 6: 1.6, 7: 2.0, 8: 2.0, 9: 1.7, 10: 1.1, 11: 0.6, 12: 0.5},
+    # OLIVE OIL (Mediterranean: flowering Apr-Jun, harvest Oct-Dec)
+    ("olive oil", "drought"):  {1: 0.5, 2: 0.5, 3: 0.8, 4: 1.5, 5: 2.0, 6: 1.8, 7: 1.3, 8: 1.0, 9: 0.8, 10: 1.4, 11: 1.0, 12: 0.5},
+    ("olive oil", "heatwave"): {1: 0.4, 2: 0.4, 3: 0.7, 4: 1.4, 5: 2.0, 6: 1.9, 7: 1.4, 8: 1.1, 9: 0.8, 10: 0.6, 11: 0.4, 12: 0.4},
+    # CANOLA (Canadian Prairies: planted Apr, flowers Jun, harvest Aug-Sep)
+    ("canola", "drought"): {1: 0.2, 2: 0.2, 3: 0.3, 4: 0.7, 5: 1.2, 6: 2.0, 7: 1.8, 8: 1.5, 9: 0.7, 10: 0.3, 11: 0.2, 12: 0.2},
+    ("canola", "frost"):   {1: 0.3, 2: 0.3, 3: 0.8, 4: 1.8, 5: 2.0, 6: 1.2, 7: 0.5, 8: 0.6, 9: 1.0, 10: 0.4, 11: 0.3, 12: 0.3},
+    # OIL (hurricane season peaks Aug-Sep; geopolitical risk year-round)
+    ("oil", "hurricane_risk"): {1: 0.3, 2: 0.3, 3: 0.3, 4: 0.4, 5: 0.6, 6: 0.9, 7: 1.4, 8: 2.0, 9: 2.0, 10: 1.2, 11: 0.4, 12: 0.3},
+    ("oil", "extreme_wind"):   {1: 0.7, 2: 0.7, 3: 0.8, 4: 0.9, 5: 0.9, 6: 1.0, 7: 1.1, 8: 1.3, 9: 1.5, 10: 1.3, 11: 1.0, 12: 0.8},
+    ("oil", "storm_wind"):     {1: 0.8, 2: 0.8, 3: 0.9, 4: 0.9, 5: 1.0, 6: 1.1, 7: 1.2, 8: 1.4, 9: 1.6, 10: 1.4, 11: 1.0, 12: 0.9},
+}
+
+# Human-readable crop/demand stage names per (commodity, anomaly) + month
+_PHENO_STAGE_NAMES: dict[tuple[str, str], dict[int, str]] = {
+    ("corn", "drought"):         {4: "Planting", 5: "Emergence", 6: "Silking", 7: "Pollination", 8: "Grain Fill", 9: "Harvest", 10: "Harvest"},
+    ("corn", "heatwave"):        {5: "Emergence", 6: "Silking", 7: "Pollination", 8: "Grain Fill"},
+    ("corn", "frost"):           {4: "Planting", 5: "Emergence", 9: "Harvest", 10: "Harvest"},
+    ("soybeans", "drought"):     {5: "Emergence", 6: "Vegetative", 7: "Flowering", 8: "Pod Fill", 9: "Maturation"},
+    ("soybeans", "heatwave"):    {7: "Flowering", 8: "Pod Fill", 9: "Maturation"},
+    ("soybeans", "frost"):       {4: "Planting", 5: "Emergence", 9: "Maturation", 10: "Harvest"},
+    ("wheat", "drought"):        {4: "Tillering", 5: "Heading", 6: "Grain Fill"},
+    ("wheat", "frost"):          {3: "Green-Up", 4: "Tillering", 5: "Heading", 10: "Winter Plant", 11: "Winter Plant"},
+    ("wheat", "heatwave"):       {5: "Heading", 6: "Grain Fill"},
+    ("coffee", "drought"):       {6: "Fruit Set", 7: "Cherry Dev", 8: "Cherry Fill", 9: "Pre-Harvest"},
+    ("coffee", "frost"):         {6: "Cherry Dev", 7: "Cherry Dev", 8: "Cherry Fill"},
+    ("natural gas", "polar_vortex"): {12: "Peak Demand", 1: "Peak Demand", 2: "Peak Demand"},
+    ("natural gas", "cold_wave"):    {12: "Winter Demand", 1: "Winter Demand", 2: "Winter Demand"},
+    ("natural gas", "heatwave"):     {7: "Cooling Demand", 8: "Peak Cooling"},
+    ("natural gas", "ice_storm"):    {12: "Demand Surge", 1: "Demand Surge", 2: "Demand Surge"},
+    ("sugar", "drought"):        {7: "Stalk Dev", 8: "Stalk Dev"},
+    ("cotton", "drought"):       {7: "Boll Set", 8: "Boll Fill"},
+    ("rice", "monsoon_failure"): {6: "Transplanting", 7: "Tillering"},
+    ("palm oil", "drought"):     {7: "Peak Yield", 8: "Peak Yield"},
+    ("olive oil", "drought"):    {4: "Pre-Flower", 5: "Flowering"},
+    ("canola", "drought"):       {5: "Rosette", 6: "Flowering"},
+    ("oil", "hurricane_risk"):   {8: "Peak Season", 9: "Peak Season"},
+}
+
+
+def compute_phenological_multiplier(row) -> tuple[float, str]:
+    """
+    Return (multiplier, stage_label) for the current commodity + anomaly + month.
+    multiplier: 0.3 (dormancy/off-season) to 2.0 (critical stage)
+    stage_label: human-readable crop stage (e.g. "Pollination", "Peak Demand")
+    Returns (1.0, "") when no calendar entry exists — neutral default.
+    """
+    import datetime
+    commodity = normalize_text(row.get("commodity"), "").lower().strip()
+    anomaly   = normalize_anomaly_key(row.get("anomaly_type", ""))
+    month     = datetime.datetime.now().month
+
+    key = (commodity, anomaly)
+    calendar = _PHENO_CALENDAR.get(key)
+    if calendar is None:
+        return 1.0, ""
+
+    multiplier = calendar.get(month, 1.0)
+    stage_name = _PHENO_STAGE_NAMES.get(key, {}).get(month, "")
+    return round(multiplier, 2), stage_name
+
+
 def compute_weather_strength(row) -> float:
+    """Compute weather strength score (0-10), boosted by Z-score rarity of the event.
+    Rare off-season anomalies (high σ) are multiplied up; weak marginal signals are penalised."""
     signal = safe_int(row.get("signal_level"))
     persistence = safe_int(row.get("persistence_score"))
     severity = safe_int(row.get("severity_score"))
@@ -620,7 +784,10 @@ def compute_weather_strength(row) -> float:
         0.20 * severity +
         0.20 * market
     )
-    return round(clamp(base), 2)
+    # Apply Z-score boost: rare off-season anomalies get a strength multiplier
+    sigma = compute_anomaly_zscore(row)
+    boost = _zscore_to_weather_boost(sigma)
+    return round(clamp(base * boost), 2)
 
 
 def compute_mapping_quality(row, symbol: str, direction: str) -> float:
@@ -710,9 +877,16 @@ def compute_final_trade_score(
     trend_factor: float = 5.0,
     confluence_bonus: float = 0.0,
     edge_score: float = 7.0,
+    pheno_multiplier: float = 1.0,
 ) -> float:
-    # Weights: weather_strength 0.30 (was 0.35), conflict_cleanliness 0.10 (was 0.15),
-    # edge_score 0.10 (new) — total still 1.00 before confluence bonus
+    """Compute final trade score (0-10).
+    Weights: weather_strength 0.30, mapping_quality 0.20, conflict_cleanliness 0.10,
+             execution_quality 0.10, seasonality 0.10, trend 0.10, edge_score 0.10.
+    After weighted sum + confluence bonus, apply phenological multiplier:
+      2.0 = critical crop stage (score boosted up to 2×, capped at 10)
+      1.0 = neutral (no change)
+      0.3 = dormancy / off-season (score heavily discounted)
+    """
     score = (
         0.30 * weather_strength +
         0.20 * mapping_quality +
@@ -722,6 +896,9 @@ def compute_final_trade_score(
         0.10 * trend_factor +
         0.10 * edge_score
     ) + confluence_bonus
+    # Phenological multiplier: crop-stage sensitivity adjusts the final score
+    pheno = max(0.3, min(pheno_multiplier, 2.0))
+    score = score * pheno
     return round(clamp(score), 2)
 
 
@@ -828,6 +1005,8 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
         same_anomaly_count = int((raw_df["Anomaly Type"] == anomaly_type).sum())
         conf_bonus = 1.0 if same_anomaly_count >= 3 else 0.5 if same_anomaly_count == 2 else 0.0
 
+        # Pheno multiplier from winner row (original df row context)
+        pheno_mult_pulse, _pheno_stage_pulse = compute_phenological_multiplier(winner)
         final_trade_score = compute_final_trade_score(
             weather_strength=weather_strength,
             mapping_quality=mapping_quality,
@@ -837,6 +1016,7 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
             trend_factor=trend_factor,
             confluence_bonus=conf_bonus,
             edge_score=edge_score,
+            pheno_multiplier=pheno_mult_pulse,
         )
 
         conviction = "MIXED" if final_trade == "No Trade" else score_bucket(int(round(final_trade_score)))
@@ -924,6 +1104,7 @@ def build_ranked_trade_table(df: pd.DataFrame) -> pd.DataFrame:
         best_symbol = symbols[0]
         mapping_quality = compute_mapping_quality(row, best_symbol, trade)
         execution_quality = compute_execution_quality(row, best_symbol)
+        pheno_mult, _pheno_stage = compute_phenological_multiplier(row)
         final_trade_score = compute_final_trade_score(
             weather_strength=weather_strength,
             mapping_quality=mapping_quality,
@@ -933,6 +1114,7 @@ def build_ranked_trade_table(df: pd.DataFrame) -> pd.DataFrame:
             trend_factor=trend_factor,
             confluence_bonus=conf_bonus,
             edge_score=edge_score,
+            pheno_multiplier=pheno_mult,
         )
 
         rows.append(
@@ -956,6 +1138,7 @@ def build_ranked_trade_table(df: pd.DataFrame) -> pd.DataFrame:
                 "Seasonality": round(seasonality_score, 2),
                 "Trend Factor": round(trend_factor, 2),
                 "Edge Score": round(edge_score, 2),
+                "Pheno Mult": round(pheno_mult, 2),
                 "Final Trade Score": round(final_trade_score, 2),
             }
         )
@@ -1003,6 +1186,8 @@ def show_weather_event_card(
     edge_score        = compute_edge_score(best_row)
     anomaly_key       = normalize_anomaly_key(anomaly_raw)
     conf_bonus        = compute_confluence_bonus(all_df, anomaly_key)
+    # Z-score for display badge on card header
+    event_sigma       = compute_anomaly_zscore(best_row)
 
     # Collect affected stocks — respecting cross-event ownership filter
     stock_list = []
@@ -1012,6 +1197,8 @@ def show_weather_event_card(
         if not symbols or trade == "No Trade":
             continue
         commodity_label = normalize_text(row.get("commodity", ""), "")
+        # Per-commodity phenological multiplier — adjusts score by crop stage sensitivity
+        pheno_mult, pheno_stage = compute_phenological_multiplier(row)
         for sym in symbols:
             if sym in seen_symbols:
                 continue
@@ -1030,6 +1217,7 @@ def show_weather_event_card(
                 trend_factor=trend_factor,
                 edge_score=edge_score,
                 confluence_bonus=conf_bonus,
+                pheno_multiplier=pheno_mult,
             )
             candidate = get_symbol_candidate(row, sym, trade.lower()) or {}
             role = candidate.get("role", commodity_label).replace("_", " ")
@@ -1044,6 +1232,8 @@ def show_weather_event_card(
                 "score": round(score, 1),
                 "role": role,
                 "commodity": commodity_label,
+                "pheno_stage": pheno_stage,
+                "pheno_mult": pheno_mult,
                 "cooldown": on_cooldown,
             })
 
@@ -1086,6 +1276,21 @@ def show_weather_event_card(
     score_pct    = min(int(event_score * 10), 100)
     commodities_str = "  ·  ".join(commodities)
 
+    # Sigma badge — colour ramps from grey (1σ) to amber (2σ) to red (3σ)
+    if event_sigma >= 2.5:
+        sigma_color = "#E74C3C"   # red — extreme
+    elif event_sigma >= 1.8:
+        sigma_color = "#F39C12"   # amber — significant
+    elif event_sigma >= 1.2:
+        sigma_color = "#5DADE2"   # blue — notable
+    else:
+        sigma_color = "#555"      # grey — marginal
+    sigma_badge = (
+        f'<span style="font-size:9px;font-weight:700;color:{sigma_color};'
+        f'border:1px solid {sigma_color};border-radius:3px;padding:1px 4px;'
+        f'margin-left:6px;letter-spacing:0.5px;">{event_sigma:.1f}σ</span>'
+    )
+
     # Build individual stock rows
     stock_rows_html = ""
     for s in stock_list[:10]:
@@ -1093,13 +1298,30 @@ def show_weather_event_card(
         d_arrow  = "▲" if s["direction"] == "Long" else "▼"
         # Cooldown indicator: greyed out with 🔁 when same (sym+region+anomaly) was logged <24h ago
         if s.get("cooldown"):
-            sym_color  = "#555"
+            sym_color   = "#555"
             score_color = "#444"
-            cd_badge   = '<span style="font-size:9px;color:#444;margin-left:4px;">🔁</span>'
+            cd_badge    = '<span style="font-size:9px;color:#444;margin-left:4px;">🔁</span>'
         else:
-            sym_color  = "#f0f0f0"
+            sym_color   = "#f0f0f0"
             score_color = d_color
-            cd_badge   = ""
+            cd_badge    = ""
+        # Phenological stage badge: show when multiplier is materially high or low
+        pm = s.get("pheno_mult", 1.0)
+        ps = s.get("pheno_stage", "")
+        if ps and pm >= 1.6:
+            pheno_badge = (
+                f'<span style="font-size:8px;font-weight:700;color:#F39C12;'
+                f'border:1px solid #F39C12;border-radius:2px;padding:0px 3px;'
+                f'margin-left:4px;white-space:nowrap;">🌱 {ps.upper()}</span>'
+            )
+        elif ps and pm <= 0.5:
+            pheno_badge = (
+                f'<span style="font-size:8px;color:#444;'
+                f'border:1px solid #333;border-radius:2px;padding:0px 3px;'
+                f'margin-left:4px;white-space:nowrap;">💤 {ps.upper()}</span>'
+            )
+        else:
+            pheno_badge = ""
         stock_rows_html += (
             f'<div style="display:flex;align-items:center;gap:8px;padding:3px 0;'
             f'border-bottom:1px solid rgba(255,255,255,0.04);">'
@@ -1107,7 +1329,7 @@ def show_weather_event_card(
             f'<span style="font-family:monospace;font-size:12px;font-weight:700;color:{sym_color};width:48px;flex-shrink:0;">{s["symbol"]}</span>'
             f'<span style="font-size:11px;font-weight:700;color:{score_color};width:28px;flex-shrink:0;">{s["score"]:.1f}</span>'
             f'<span style="font-size:10px;color:#555;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">{s["role"]}</span>'
-            f'{cd_badge}'
+            f'{pheno_badge}{cd_badge}'
             f'</div>'
         )
 
@@ -1122,6 +1344,7 @@ def show_weather_event_card(
         f'<div style="text-align:right;line-height:1;">'
         f'<span style="font-size:26px;font-weight:700;color:white;">{event_score:.1f}</span>'
         f'<span style="font-size:11px;color:#555;">&thinsp;/10</span>'
+        f'{sigma_badge}'
         f'</div></div>'
 
         f'<div style="font-size:17px;font-weight:700;color:#f0f0f0;margin-bottom:2px;">{region}</div>'
@@ -1148,6 +1371,25 @@ def show_weather_event_card(
             f"**Forecast window**  \n"
             f"{format_dt(best_row.get('forecast_start'))} → {format_dt(best_row.get('forecast_end'))}"
         )
+        # Z-score context line
+        sigma_label = (
+            "🔴 Extreme (3σ+)" if event_sigma >= 2.7
+            else "🟠 Severe (2σ+)"  if event_sigma >= 1.8
+            else "🔵 Notable (1σ+)" if event_sigma >= 1.2
+            else "⚪ Marginal (<1σ)"
+        )
+        d1.markdown(f"**Anomaly Z-Score**  \n{event_sigma:.2f}σ — {sigma_label}")
+        # Top pheno stage (from highest-scoring stock)
+        top_pheno_info = ""
+        for s in stock_list[:3]:
+            if s.get("pheno_stage"):
+                pm = s["pheno_mult"]
+                stage = s["pheno_stage"]
+                top_pheno_info = f"{stage} ({pm:.1f}×) — {s['commodity']}"
+                break
+        if top_pheno_info:
+            d1.markdown(f"**Crop Stage (top signal)**  \n{top_pheno_info}")
+
         score_html = (
             progress_bar_html("Weather Strength", weather_strength) +
             progress_bar_html("Seasonality",      seasonality_score) +
@@ -1155,6 +1397,20 @@ def show_weather_event_card(
             progress_bar_html("Edge Score",       edge_score) +
             progress_bar_html("Event Score",      event_score)
         )
+        # Pheno multiplier bar: show for top stock with known pheno
+        top_pheno_mult = next((s["pheno_mult"] for s in stock_list if s.get("pheno_stage")), None)
+        if top_pheno_mult is not None:
+            pheno_pct = min(int(top_pheno_mult / 2.0 * 100), 100)
+            pheno_color = "#F39C12" if top_pheno_mult >= 1.5 else "#5DADE2" if top_pheno_mult >= 1.0 else "#555"
+            pheno_bar = (
+                f'<div style="margin-bottom:6px;">'
+                f'<div style="font-size:10px;color:#888;margin-bottom:2px;">'
+                f'Pheno Multiplier&nbsp;<span style="color:{pheno_color};font-weight:700;">{top_pheno_mult:.2f}×</span></div>'
+                f'<div style="background:#1a1a1a;border-radius:3px;height:5px;">'
+                f'<div style="background:{pheno_color};width:{pheno_pct}%;height:5px;border-radius:3px;"></div>'
+                f'</div></div>'
+            )
+            score_html = score_html + pheno_bar
         d2.markdown(score_html, unsafe_allow_html=True)
 
         st.markdown("**Why this signal triggered**")
