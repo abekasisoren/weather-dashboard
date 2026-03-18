@@ -1152,6 +1152,791 @@ def build_ranked_trade_table(df: pd.DataFrame) -> pd.DataFrame:
     return ranked_df
 
 
+# ─── Reasoning infrastructure ─────────────────────────────────────────────────
+# Trade thesis: causal chain from weather event to equity price impact.
+# Keys: (anomaly_type_key, "Long" | "Short")
+TRADE_THESIS: dict[tuple[str, str], str] = {
+    # HEATWAVE
+    ("heatwave", "Long"): (
+        "Heatwaves drive a surge in cooling energy demand — natural gas and power grid stress lift "
+        "utility revenues and HVAC manufacturers. Agricultural commodities (corn, soybeans, wheat) "
+        "face yield risk which lifts ETF prices. The market typically under-prices sustained "
+        "multi-day heat before the first confirmed crop condition downgrades."
+    ),
+    ("heatwave", "Short"): (
+        "Extreme heat stresses crops during sensitive growth stages, raising input costs for food "
+        "manufacturers and compressing margins at consumer staples companies. Airlines and logistics "
+        "face operational disruptions. Property & casualty insurers see elevated heat-related claims."
+    ),
+    # EXTREME_HEAT
+    ("extreme_heat", "Long"): (
+        "Extreme heat events are structurally bullish for energy infrastructure, HVAC, and water "
+        "utilities — demand spikes that utilities often cannot fully hedge in advance. Agricultural "
+        "commodity futures benefit as yield outlooks are revised sharply downward."
+    ),
+    ("extreme_heat", "Short"): (
+        "Food companies face abrupt input cost spikes as crop yields deteriorate. Property & casualty "
+        "insurers accumulate heat-related claims from infrastructure damage. Outdoor "
+        "labour-intensive industries (construction, agriculture) see productivity and revenue declines."
+    ),
+    # FROST
+    ("frost", "Long"): (
+        "Late-season frost destroys standing crops and damages perennial plants (coffee, grapes, citrus) "
+        "— a direct supply shock that takes months to recover. Commodity ETFs and futures respond "
+        "sharply within 48–72 hours of confirmation. Fertiliser companies benefit as farmers replant. "
+        "Heating fuel demand spikes short-term."
+    ),
+    ("frost", "Short"): (
+        "Food and beverage companies relying on affected crops face margin compression as raw material "
+        "costs surge. Airlines and logistics face disruption costs. Reinsurance companies with "
+        "agricultural crop book exposure accumulate losses."
+    ),
+    # DROUGHT
+    ("drought", "Long"): (
+        "Drought is the single most powerful supply-side shock to agricultural commodities. Persistent "
+        "multi-week deficits at critical crop stages cause irreversible yield loss — the market "
+        "typically takes 4–6 weeks to fully price the supply reduction. Water utility stocks benefit "
+        "from elevated pricing power. Fertiliser demand spikes in the following season as "
+        "farmers rebuild yields."
+    ),
+    ("drought", "Short"): (
+        "Agricultural commodity consumers (food manufacturers, ethanol producers, livestock feed buyers) "
+        "face sharply higher input costs. Hydropower utilities see reduced generation capacity. "
+        "Shipping companies with river-route exposure (Mississippi, Rhine, Paraná) face draft "
+        "restrictions and delayed cargoes."
+    ),
+    # HEAVY_RAIN
+    ("heavy_rain", "Long"): (
+        "Heavy rainfall events create reconstruction demand — homebuilders, building material companies, "
+        "and home improvement retailers historically see elevated revenues in the 1–3 months following "
+        "major flood events. Infrastructure and water management firms benefit from government "
+        "emergency spending."
+    ),
+    ("heavy_rain", "Short"): (
+        "Property & casualty insurers face elevated claims. Agricultural producers suffer waterlogged "
+        "fields that delay planting, cause root rot, and destroy standing crops. Logistics companies "
+        "face route disruptions and shipment delays."
+    ),
+    # FLOOD_RISK
+    ("flood_risk", "Long"): (
+        "Flood risk signals translate to reconstruction spend — home improvement, building materials, "
+        "and infrastructure plays typically outperform for 2–6 months post-event. Water management "
+        "infrastructure companies see accelerated project pipelines. Agricultural futures spike "
+        "on supply disruption."
+    ),
+    ("flood_risk", "Short"): (
+        "Catastrophe insurers and reinsurers bear the direct financial loss from flood claims. "
+        "Historical Brazilian and Southeast Asian flood events have triggered $2–8B in industry "
+        "claims. Affected agricultural exporters (sugar, coffee, soy) face logistics disruption "
+        "and quality degradation."
+    ),
+    # COLD_WAVE
+    ("cold_wave", "Long"): (
+        "Cold waves create immediate natural gas demand spikes — utilities scramble to secure supply "
+        "and spot prices can double within 48 hours of onset. Heating fuel distributors and LNG "
+        "shippers benefit. HVAC service companies see emergency repair surges."
+    ),
+    ("cold_wave", "Short"): (
+        "Cold snaps disrupt logistics networks and outdoor operations. Agricultural sectors face crop "
+        "freeze risk. Airlines face delays and cancellations. Retail foot traffic drops sharply "
+        "in affected regions, pressuring consumer discretionary revenues."
+    ),
+    # STORM_WIND
+    ("storm_wind", "Long"): (
+        "Severe wind events disrupt energy infrastructure and logistics — short-term power price spikes "
+        "benefit merchant generators. Reconstruction plays (roofing, building materials) see elevated "
+        "demand in the 1–4 months following. Offshore energy operators may face disruption premiums."
+    ),
+    ("storm_wind", "Short"): (
+        "Property insurers face structural and roof damage claims. Offshore energy producers face "
+        "temporary shutdown costs. Shipping and logistics companies experience port delays and cargo "
+        "damage. Agricultural producers lose standing crops to wind damage."
+    ),
+    # WILDFIRE_RISK
+    ("wildfire_risk", "Long"): (
+        "Wildfire risk creates elevated demand for emergency management, fire retardant chemicals, and "
+        "rebuilding materials. Air quality deterioration boosts indoor air purification product sales. "
+        "Backup power generators (GNRC) see accelerated demand as grid stability is threatened."
+    ),
+    ("wildfire_risk", "Short"): (
+        "Utilities in fire-prone regions face enormous liability exposure — Pacific Gas & Electric's "
+        "2018 bankruptcy is the template. Property insurers face escalating claims and may withdraw "
+        "coverage from high-risk areas. Tourism and outdoor recreation revenues collapse during "
+        "active fire events."
+    ),
+    # HURRICANE_RISK
+    ("hurricane_risk", "Long"): (
+        "Hurricane events create one of the largest near-term reconstruction demand surges in any "
+        "weather category — home improvement retailers (HD, LOW) historically see 5–15% revenue "
+        "lifts in the quarter following a major storm. Offshore energy disruption is bullish for "
+        "oil prices short-term."
+    ),
+    ("hurricane_risk", "Short"): (
+        "Catastrophe reinsurers face peak loss events — a single major Gulf Coast hurricane can wipe "
+        "out an entire year of underwriting profit. Offshore oil producers suffer production shutdowns "
+        "averaging 2–6 weeks per major event. Coastal real estate companies face pricing and "
+        "insurance market disruption."
+    ),
+    # POLAR_VORTEX
+    ("polar_vortex", "Long"): (
+        "Polar vortex events are the most extreme natural gas demand shock in the weather trading "
+        "playbook. The February 2021 Texas event sent Henry Hub spot prices from $3/MMBtu to over "
+        "$1,200/MMBtu in 72 hours. Pipeline operators, LNG shippers, and gas storage companies "
+        "benefit enormously. Heating oil distributors face a demand surge they cannot always fulfil."
+    ),
+    ("polar_vortex", "Short"): (
+        "Industrial manufacturers face sharp production cost spikes as energy prices surge. Airlines "
+        "suffer mass cancellations and operational disruption. Automotive and retail logistics break "
+        "down across entire supply chains. Property insurers face burst-pipe and freeze damage "
+        "claims at scale."
+    ),
+    # ATMOSPHERIC_RIVER
+    ("atmospheric_river", "Long"): (
+        "Atmospheric river events in California and the Pacific Northwest deliver extreme precipitation "
+        "that simultaneously creates flood damage (reconstruction demand) and replenishes reservoirs "
+        "(hydropower benefit). Water infrastructure companies and drought-recovery plays benefit."
+    ),
+    ("atmospheric_river", "Short"): (
+        "Flooding from atmospheric rivers disrupts California's produce belt and Central Valley farming "
+        "operations. Property insurers face elevated claims. Infrastructure companies face project "
+        "delays as construction halts during flood events."
+    ),
+    # MONSOON_FAILURE
+    ("monsoon_failure", "Long"): (
+        "A failed monsoon in South or Southeast Asia is a major supply shock for rice, sugar, palm oil, "
+        "and cotton. Global food price inflation follows 3–6 months later. Agricultural commodity "
+        "ETFs and fertiliser companies benefit as farmers rebuild depleted soil on 6–12 month horizons."
+    ),
+    ("monsoon_failure", "Short"): (
+        "Food companies with heavy Asia-Pacific sourcing exposure face sharply higher input costs. "
+        "Indian and Southeast Asian consumer staples companies suffer margin compression. Micro-finance "
+        "institutions with rural agricultural loan books face elevated default risk."
+    ),
+    # ICE_STORM
+    ("ice_storm", "Long"): (
+        "Ice storms are highly disruptive to power grids — ice accumulation on lines causes outages "
+        "that take days to restore. Natural gas demand spikes as backup heating kicks in. Emergency "
+        "generator companies and utilities with peaker capacity benefit. Road salt and de-icing "
+        "companies see elevated demand."
+    ),
+    ("ice_storm", "Short"): (
+        "Property insurers face roof collapse, vehicle damage, and structural claims. Airlines suffer "
+        "severe cancellations and fleet damage. Retailers see foot traffic collapse. Infrastructure "
+        "operators face costly repair programmes for power lines and roads."
+    ),
+    # EXTREME_WIND
+    ("extreme_wind", "Long"): (
+        "Extreme wind events at offshore energy installations force production shutdowns — bullish for "
+        "crude oil and natural gas spot prices short-term. Emergency response contractors and marine "
+        "insurance companies benefit. Reconstruction of damaged infrastructure drives materials demand."
+    ),
+    ("extreme_wind", "Short"): (
+        "Offshore oil and gas producers face forced shutdowns and equipment damage. Marine insurers "
+        "accumulate claims. Shipping companies face port closures and cargo delays. Coastal agriculture "
+        "faces crop damage that takes multiple seasons to recover."
+    ),
+}
+
+# What would weaken or invalidate each signal — checklist for the analyst
+INVALIDATION_CONDITIONS: dict[str, str] = {
+    "heatwave": (
+        "**Watch for:** ECMWF next-run showing the heat dome weakening or moving offshore. Check the "
+        "500hPa geopotential height ridge — if it breaks, temperatures normalise within 72h. Also watch: "
+        "La Niña transition (historically cools Midwest summers). Conviction drops if signal_level falls "
+        "below 5 or if USDA crop condition Good/Excellent ratings hold above 60%."
+    ),
+    "extreme_heat": (
+        "**Watch for:** Upper-level ridge pattern breaking down in the 5-day ensemble. Pacific SST "
+        "anomalies — a marine layer incursion can cap coastal temperatures within 48h. Conviction drops "
+        "sharply if persistence falls to zero consecutive model runs."
+    ),
+    "frost": (
+        "**Watch for:** Warm air mass advection forecast within the next 5 days. Check 850hPa temperature "
+        "anomalies — if they flip positive, the cold outbreak is over. Also critical: if the affected "
+        "crop has already passed its vulnerable growth stage (post-harvest), market impact is minimal."
+    ),
+    "drought": (
+        "**Watch for:** ECMWF showing significant precipitation (≥25mm in 7 days) in the affected region, "
+        "or La Niña transitioning to ENSO-neutral (typically ends dry spells across the Americas). "
+        "Key confirmation: USDA weekly crop condition ratings — if Good/Excellent rises above 65%, "
+        "the market is healing and the trade thesis has largely played out."
+    ),
+    "heavy_rain": (
+        "**Watch for:** The weather system dissipating with the next 7-day forecast showing normal "
+        "precipitation. River gauge levels — once they recede below flood stage, the acute disruption "
+        "phase ends. Also: USDA replanting window — if farmers can replant within 2 weeks, yield "
+        "loss is limited and the bullish commodity thesis weakens."
+    ),
+    "flood_risk": (
+        "**Watch for:** The upstream weather system weakening, or river basin drainage occurring faster "
+        "than forecast (check real-time gauge data). Government flood relief announcements can dampen "
+        "insurance stock downside by capping private sector liability. Conviction drops if no confirmed "
+        "infrastructure damage is reported within 48h of onset."
+    ),
+    "cold_wave": (
+        "**Watch for:** The arctic air mass retreating faster than forecast — track 850hPa temperature "
+        "contours. Natural gas storage data (weekly EIA report) reveals whether the market has already "
+        "priced the demand spike (gas price flat despite cold = trade largely priced in)."
+    ),
+    "storm_wind": (
+        "**Watch for:** The storm system weakening below gale-force thresholds in the next ECMWF run. "
+        "National Hurricane Center advisories (for tropical systems) or European met agency severe weather "
+        "warnings. Check Baltic Dry Index for early routing changes by shipping companies."
+    ),
+    "wildfire_risk": (
+        "**Watch for:** Onshore wind patterns shifting (reducing fire spread risk) or humidity rising "
+        "above 30% in the affected region. NIFC containment percentages — above 75% containment, the "
+        "acute stock impact is mostly priced. Also watch: utility emergency shutoff orders being lifted "
+        "as a leading indicator of normalisation."
+    ),
+    "hurricane_risk": (
+        "**Watch for:** National Hurricane Center downgrading the system or tracking it away from land. "
+        "Offshore energy impact depends critically on whether the storm passes within 100 miles of Gulf "
+        "production infrastructure. Daily NHC forecast cone narrowing is the key data point. Below "
+        "26°C Atlantic SSTs, hurricane systems weaken rapidly."
+    ),
+    "polar_vortex": (
+        "**Watch for:** The stratospheric warming event (SSW) that splits the polar vortex beginning to "
+        "recover — typically a 3–4 week process. Track 10hPa temperature at 90°N. Also critical: LNG "
+        "import capacity and storage inventory levels — a well-supplied market absorbs the demand shock "
+        "more easily and the gas price spike may be capped earlier than the weather signal implies."
+    ),
+    "atmospheric_river": (
+        "**Watch for:** The atmospheric river train (consecutive ARs) breaking as the Pacific jet stream "
+        "weakens or shifts north. Track integrated vapour transport (IVT) forecasts from NOAA. Key pivot: "
+        "if ARs are refilling reservoirs without causing flooding, the signal shifts from bearish "
+        "crop/infrastructure to bullish hydropower."
+    ),
+    "monsoon_failure": (
+        "**Watch for:** IMD (India Meteorological Department) or BMKG (Indonesia) upgrading the monsoon "
+        "outlook. Track the Indian Ocean Dipole (IOD) index — a positive IOD is the key driver of "
+        "monsoon failure; if it reverses, expect rapid recovery. Government-subsidised irrigation can "
+        "partially compensate for rainfall deficit, limiting the yield loss."
+    ),
+    "ice_storm": (
+        "**Watch for:** Surface temperatures rising above 2°C within the forecast window — precipitation "
+        "shifts from freezing rain to regular rain. Track surface dew point and 850hPa wet-bulb zero "
+        "level. Also: utility companies' ice storm restoration ETAs — rapid grid restoration (<48h) "
+        "contains the insurance loss estimates."
+    ),
+    "extreme_wind": (
+        "**Watch for:** The storm system weakening in the next ECMWF run or changing track away from "
+        "offshore infrastructure. Check offshore rig operator daily status reports and vessel tracking "
+        "portals — early platform evacuation signals the market is already pricing the disruption. "
+        "If no production shutdown is announced within 24h of onset, market impact is likely overstated."
+    ),
+}
+
+# Crop stage narratives: (commodity, anomaly_type) → detailed explanation
+PHENO_NARRATIVE: dict[tuple[str, str], str] = {
+    ("corn", "drought"): (
+        "Corn's most drought-sensitive period is **pollination (July)**, when the tassel sheds pollen "
+        "and the silk must be receptive simultaneously. A 5-day drought during pollination can cause "
+        "30–50% yield loss. Outside this window (e.g., January–March), corn is dormant or not yet "
+        "planted — drought has virtually no crop market impact."
+    ),
+    ("corn", "heatwave"): (
+        "Heat stress above **35°C during pollination (July)** kills pollen and causes kernel abortion. "
+        "Studies show a 6% yield loss per degree above 29°C during grain fill (August). Before May "
+        "planting, heat has minimal crop impact but may signal a difficult growing season ahead."
+    ),
+    ("corn", "frost"): (
+        "Frost at **planting time (April–May)** destroys germinating seeds and forces replanting, "
+        "delaying the growing season by 2–4 weeks. Late-season frost (September–October) kills the "
+        "plant before harvest, locking in yield loss. Mid-summer frost is extremely rare and "
+        "immediately market-moving."
+    ),
+    ("soybeans", "drought"): (
+        "Soybeans are most sensitive to drought during **pod fill (August)**, when water stress directly "
+        "reduces the number of seeds per pod. A 2-week August drought can cut yields by 20–40%. "
+        "Pre-planting drought (before May) has minimal direct yield impact but signals a late-start "
+        "season and elevated risk later in the season."
+    ),
+    ("soybeans", "heatwave"): (
+        "Heat stress above **32°C during flowering (July)** disrupts pollen viability and pod set. "
+        "The critical window is narrow — just 2–3 weeks — but irreversible. August heat during pod "
+        "fill compounds the damage. Off-season heat (winter months) has negligible crop impact."
+    ),
+    ("soybeans", "frost"): (
+        "**Planting-time frost (April–May)** is extremely damaging, forcing replanting that shifts the "
+        "whole season later. Early harvest frost (September–October) kills plants before full pod "
+        "maturity, directly reducing protein content and yield. Mid-summer frost is very rare for "
+        "soybeans in commercial growing regions."
+    ),
+    ("wheat", "drought"): (
+        "Wheat is most vulnerable to drought at **heading and grain fill (May–June** for winter wheat). "
+        "Spring dryness reduces the number of kernels per head; grain-fill drought shrinks kernel size. "
+        "Combined, these can cut yields by 25–45%. Winter dormancy drought (December–February) has "
+        "limited immediate impact but increases spring moisture stress risk."
+    ),
+    ("wheat", "frost"): (
+        "**Green-up frost (March–April)** is the most damaging — the plant has broken dormancy but is "
+        "still vulnerable to tissue freeze. A single night below −4°C at heading destroys the crop. "
+        "Vernalisation frosts (December–February) are actually necessary and beneficial for winter "
+        "wheat yield — the plant requires cold to properly flower."
+    ),
+    ("wheat", "heatwave"): (
+        "Heat stress above **30°C during heading and early grain fill (May–June)** accelerates "
+        "maturation and reduces kernel weight. This is sometimes called 'heat blasting' — "
+        "a rapid deterioration from which the crop cannot recover. A 1-week heat event during "
+        "this window can reduce yields by 15–25%."
+    ),
+    ("coffee", "drought"): (
+        "Coffee trees require consistent moisture during **cherry development (July–September** in "
+        "Brazil). Drought stress at this stage causes premature cherry drop and smaller bean size. "
+        "The 2021 Brazilian drought-frost combination cut global Arabica production by ~30%, driving "
+        "coffee ETF (JO) +120% over 12 months. Off-season drought affects the following year's crop."
+    ),
+    ("coffee", "frost"): (
+        "Coffee trees are extremely frost-sensitive — **a single night below 0°C during cherry "
+        "development (June–August)** destroys the crop. Brazil's July frost events are the most feared "
+        "weather risk in the soft commodities market. Recovery takes 1–2 years for mature trees to "
+        "resume full yield — making this a multi-year supply story."
+    ),
+    ("coffee", "heatwave"): (
+        "Sustained heat above **34°C during cherry fill (August)** causes heat stress that reduces "
+        "bean quality and weight. Unlike frost, heat damage is gradual. The impact on tradeable "
+        "prices tends to emerge 2–4 months after the growing season, when shipment quality "
+        "assessments confirm the damage."
+    ),
+    ("cocoa", "drought"): (
+        "Cocoa pods develop over **5–6 months** and require consistent moisture throughout. Drought "
+        "during pod development (the long dry season, June–August in West Africa) causes premature "
+        "pod death and reduces mid-crop output. The 2023–24 West Africa drought was the largest supply "
+        "shock in 20 years, driving cocoa prices to all-time highs above $10,000/tonne."
+    ),
+    ("cocoa", "heavy_rain"): (
+        "Excessive rainfall during cocoa harvest (October–March, main crop) promotes **black pod "
+        "disease** — a fungal pathogen (Phytophthora palmivora) that can destroy 20–30% of a crop. "
+        "Heavy rain at harvest also delays picking and fermentation, reducing quality and export value."
+    ),
+    ("natural gas", "polar_vortex"): (
+        "Polar vortex events create the **single largest short-term natural gas demand surge** in the "
+        "weather trading calendar. The February 2021 Texas event drove Henry Hub spot prices from "
+        "$3/MMBtu to over $1,200/MMBtu — a 400× spike — in under 72 hours. Pipeline freeze-offs "
+        "simultaneously cut supply while demand surges, creating a perfect demand-supply dislocation."
+    ),
+    ("natural gas", "cold_wave"): (
+        "Cold waves drive residential and industrial heating demand well above seasonal norms. "
+        "The **EIA weekly storage report** is the key confirmation signal — a draw larger than the "
+        "5-year seasonal average typically accelerates the gas price move. The trade thesis is "
+        "strongest in early winter (November–January) when storage is still being actively drawn."
+    ),
+    ("natural gas", "heatwave"): (
+        "Summer heatwaves drive natural gas demand for **power generation cooling**. Gas-fired peaker "
+        "plants are dispatched to meet air conditioning load. The hottest weeks of summer (July–August) "
+        "see gas burns at power plants approach winter heating levels. This is the second seasonal "
+        "demand peak for gas, often underpriced by the market."
+    ),
+    ("natural gas", "ice_storm"): (
+        "Ice storms disrupt **pipeline and LNG terminal operations** while simultaneously spiking "
+        "heating demand. Ice accumulation on meters, regulators, and compressor stations can cause "
+        "emergency shutdowns. Combined demand surge and supply disruption is a powerful short-term "
+        "gas price catalyst."
+    ),
+    ("sugar", "drought"): (
+        "Sugarcane is a 12-month crop — drought during the **vegetative growth phase (June–August** "
+        "in Brazil's Center-South) reduces sucrose content and stalk biomass. A 10% rainfall deficit "
+        "during this period typically translates to a 5–8% production shortfall. Brazil produces ~40% "
+        "of global sugar — its weather is the single largest price driver for the commodity."
+    ),
+    ("cotton", "drought"): (
+        "Cotton is most vulnerable to drought during **boll set and fill (July–August)**. Water stress "
+        "at this stage causes boll shedding, reducing the number of harvestable bolls. A prolonged "
+        "drought during the boll development window can cut yields by 30–40%, directly impacting "
+        "textile manufacturers' raw material costs."
+    ),
+    ("rice", "monsoon_failure"): (
+        "The Asian rice crop is almost entirely rain-fed — **a failed or delayed monsoon is existential** "
+        "for the growing season. Transplanting requires standing water; if the monsoon doesn't "
+        "arrive by June–July, farmers delay or abandon the main season crop. India, Thailand, and "
+        "Vietnam together supply 65% of global rice exports — a monsoon failure affects global food security."
+    ),
+    ("rice", "drought"): (
+        "Rice requires consistent water availability throughout the growing season, making it one of "
+        "the most drought-sensitive staple crops. The **tillering and heading stages (June–August** in "
+        "Asia) are most critical — water deficit at this point directly reduces the number of grains "
+        "per panicle and final yield."
+    ),
+    ("palm oil", "drought"): (
+        "Palm oil production is relatively drought-resilient but a prolonged dry period (3+ months) "
+        "causes stress that reduces **fresh fruit bunch (FFB) yields 9–18 months later** — a long-lag "
+        "effect that the market often underprices at the time of the drought. July–September "
+        "corresponds to peak annual production in Malaysia and Indonesia."
+    ),
+    ("palm oil", "monsoon_failure"): (
+        "A failed monsoon dramatically reduces the soil moisture available for palm oil trees during "
+        "the **critical mid-year growing period**. Unlike seasonal crops, palm oil effects materialise "
+        "with a lag of 6–18 months as the trees respond to cumulative water deficit. This "
+        "lagged impact is a consistent source of market mispricing."
+    ),
+    ("olive oil", "drought"): (
+        "The **olive flowering period (April–May** in Mediterranean regions) is critically sensitive "
+        "to water stress — drought at this stage reduces fruit set and directly constrains annual "
+        "production. European olive oil prices hit 40-year highs in 2023–24 as successive Iberian "
+        "droughts decimated back-to-back crops."
+    ),
+    ("olive oil", "heatwave"): (
+        "Heat above **38°C during flowering (April–May)** causes pollen sterility and abscission of "
+        "young fruit. The effect is irreversible within the season. Since olive trees are biennial "
+        "(alternating heavy and light years), a heat-damaged flowering year creates a multi-year "
+        "supply shortfall."
+    ),
+    ("canola", "drought"): (
+        "Canadian canola **flowering (June)** is the most water-sensitive growth stage — heat and "
+        "drought during bloom cause pod shatter and blank seeds. The Canadian Prairies produce 75% "
+        "of global canola exports. A drought signal in June/July is extremely market-moving for "
+        "canola futures and NTR (Nutrien) as farmers face replanting decisions."
+    ),
+    ("canola", "frost"): (
+        "Spring frost at **planting time (April–May)** is the primary frost risk for canola — "
+        "seedlings are extremely vulnerable to temperatures below −3°C. A late-season frost "
+        "(September) can also damage pods before harvest. The 2020 Alberta early frost destroyed "
+        "~15% of the crop within a single week."
+    ),
+    ("oil", "hurricane_risk"): (
+        "The US Gulf of Mexico hosts ~15% of US oil production in shallow offshore platforms. "
+        "A **Category 3+ storm tracking within 100 miles** of the main production corridor triggers "
+        "mandatory evacuation — historically removing 1.5–2.5 million barrels/day for 2–6 weeks. "
+        "The market typically begins pricing this 72h before landfall."
+    ),
+    ("oil", "extreme_wind"): (
+        "Extreme wind events force **emergency shutdown of offshore platforms and pipeline systems**. "
+        "North Sea shutdowns during winter storms (October–March) are a recurring supply disruption. "
+        "Each major shutdown removes 500k–1.5M bbl/day. The oil price response is typically "
+        "immediate (within 24h of shutdown announcement) and mean-reverts within 2–3 weeks."
+    ),
+}
+
+
+def _sigma_frequency_label(sigma: float) -> str:
+    """Convert Z-score to plain-English frequency estimate."""
+    if sigma >= 3.0:
+        return "generational extreme — fewer than 0.3% of historical records reach this intensity"
+    elif sigma >= 2.5:
+        return "once-in-a-generation event — occurs roughly 1 in 80–100 years in this region and season"
+    elif sigma >= 2.0:
+        return "rare event — occurs roughly 1 in every 20–50 years in this region and season"
+    elif sigma >= 1.5:
+        return "unusual event — occurs roughly 1 in every 10–15 years for this region and season"
+    elif sigma >= 1.0:
+        return "notable but not unprecedented — occurs a few times per decade in this region"
+    else:
+        return "marginal deviation from normal — market is likely already partially aware of conditions"
+
+
+def build_score_decomposition_html(
+    weather_strength: float,
+    mapping_quality: float,
+    seasonality_score: float,
+    trend_factor: float,
+    edge_score: float,
+    execution_quality: float,
+    conf_bonus: float,
+    top_pheno_mult: float,
+    event_score: float,
+    accent: str = "#5DADE2",
+) -> str:
+    """Build an HTML score decomposition table showing every component's weighted contribution."""
+    components = [
+        ("Weather Strength",  0.30, weather_strength),
+        ("Mapping Quality",   0.20, mapping_quality),
+        ("Seasonality",       0.10, seasonality_score),
+        ("Trend Factor",      0.10, trend_factor),
+        ("Edge Score",        0.10, edge_score),
+        ("Execution Quality", 0.10, execution_quality),
+    ]
+
+    rows_html = ""
+    for name, weight, score in components:
+        contrib = weight * score
+        pct = min(int(score * 10), 100)
+        bar_color = "#2ECC71" if score >= 7 else "#F39C12" if score >= 5 else "#E74C3C"
+        rows_html += (
+            f'<tr style="border-bottom:1px solid rgba(255,255,255,0.03);">'
+            f'<td style="padding:5px 10px;font-size:11px;color:#aaa;">{name}</td>'
+            f'<td style="padding:5px 10px;font-size:10px;color:#555;text-align:center;">{weight:.0%}</td>'
+            f'<td style="padding:5px 10px;">'
+            f'<div style="display:flex;align-items:center;gap:6px;">'
+            f'<div style="background:#1a1a1a;border-radius:2px;height:4px;width:64px;flex-shrink:0;">'
+            f'<div style="background:{bar_color};width:{pct}%;height:4px;border-radius:2px;"></div></div>'
+            f'<span style="font-size:11px;color:#ddd;font-weight:600;">{score:.1f}</span>'
+            f'</div></td>'
+            f'<td style="padding:5px 10px;font-size:11px;color:#777;text-align:right;">+{contrib:.2f}</td>'
+            f'</tr>'
+        )
+
+    if conf_bonus > 0:
+        rows_html += (
+            f'<tr style="border-bottom:1px solid rgba(255,255,255,0.03);">'
+            f'<td style="padding:5px 10px;font-size:11px;color:#aaa;">Confluence Bonus</td>'
+            f'<td style="padding:5px 10px;font-size:10px;color:#555;text-align:center;">+add</td>'
+            f'<td style="padding:5px 10px;font-size:11px;color:#F39C12;">multi-region</td>'
+            f'<td style="padding:5px 10px;font-size:11px;color:#F39C12;text-align:right;">+{conf_bonus:.2f}</td>'
+            f'</tr>'
+        )
+
+    if top_pheno_mult != 1.0:
+        pheno_color = "#F39C12" if top_pheno_mult >= 1.5 else "#5DADE2" if top_pheno_mult >= 1.0 else "#E74C3C"
+        rows_html += (
+            f'<tr style="border-bottom:1px solid rgba(255,255,255,0.03);">'
+            f'<td style="padding:5px 10px;font-size:11px;color:#aaa;">Pheno Multiplier</td>'
+            f'<td style="padding:5px 10px;font-size:10px;color:#555;text-align:center;">×mult</td>'
+            f'<td style="padding:5px 10px;font-size:11px;color:{pheno_color};">{top_pheno_mult:.2f}×</td>'
+            f'<td style="padding:5px 10px;font-size:11px;color:{pheno_color};text-align:right;">×crop stage</td>'
+            f'</tr>'
+        )
+
+    rows_html += (
+        f'<tr style="border-top:1px solid rgba(255,255,255,0.10);">'
+        f'<td colspan="3" style="padding:8px 10px;font-size:12px;font-weight:700;color:#f0f0f0;">FINAL SCORE</td>'
+        f'<td style="padding:8px 10px;font-size:15px;font-weight:700;color:{accent};text-align:right;">{event_score:.1f}/10</td>'
+        f'</tr>'
+    )
+
+    return (
+        f'<table style="width:100%;border-collapse:collapse;background:rgba(0,0,0,0.25);'
+        f'border-radius:6px;overflow:hidden;margin-bottom:4px;">'
+        f'<thead>'
+        f'<tr style="border-bottom:1px solid rgba(255,255,255,0.07);">'
+        f'<th style="padding:6px 10px;font-size:9px;font-weight:700;color:#444;letter-spacing:1px;'
+        f'text-transform:uppercase;text-align:left;">Component</th>'
+        f'<th style="padding:6px 10px;font-size:9px;font-weight:700;color:#444;letter-spacing:1px;'
+        f'text-transform:uppercase;text-align:center;">Weight</th>'
+        f'<th style="padding:6px 10px;font-size:9px;font-weight:700;color:#444;letter-spacing:1px;'
+        f'text-transform:uppercase;text-align:left;">Score</th>'
+        f'<th style="padding:6px 10px;font-size:9px;font-weight:700;color:#444;letter-spacing:1px;'
+        f'text-transform:uppercase;text-align:right;">Contrib</th>'
+        f'</tr>'
+        f'</thead>'
+        f'<tbody>{rows_html}</tbody>'
+        f'</table>'
+    )
+
+
+def build_detailed_reasoning(
+    best_row,
+    event_sigma: float,
+    weather_strength: float,
+    seasonality_score: float,
+    trend_factor: float,
+    edge_score: float,
+    conf_bonus: float,
+    stock_list: list,
+    event_score: float,
+    region: str,
+    anomaly_key: str,
+    commodities: list,
+    trend_dir: str,
+    all_df: "pd.DataFrame",
+    accent: str = "#5DADE2",
+) -> None:
+    """Render detailed reasoning inside an st.expander — educational breakdown of every score component."""
+    import datetime
+
+    # ── Derive top-stock context ───────────────────────────────────────────────
+    top_stock = stock_list[0] if stock_list else {}
+    top_pheno_mult  = top_stock.get("pheno_mult", 1.0)
+    top_pheno_stage = top_stock.get("pheno_stage", "")
+    top_commodity   = top_stock.get("commodity", "")
+    top_symbol      = top_stock.get("symbol", "")
+    top_direction   = top_stock.get("direction", "Long")
+    mq = compute_mapping_quality(best_row, top_symbol, top_direction) if top_symbol else 0.0
+    eq = compute_execution_quality(best_row, top_symbol) if top_symbol else 0.0
+
+    current_month = datetime.datetime.now().month
+    month_name = {
+        1: "January", 2: "February", 3: "March", 4: "April",
+        5: "May", 6: "June", 7: "July", 8: "August",
+        9: "September", 10: "October", 11: "November", 12: "December",
+    }.get(current_month, "")
+
+    # ── Seasonality narrative ──────────────────────────────────────────────────
+    if seasonality_score >= 8.0:
+        season_ctx = (
+            f"**Off-season anomaly** — {anomaly_key.replace('_',' ')} in {month_name} is "
+            f"climatologically unexpected for {region}. The market is very likely under-positioned. "
+            f"(Seasonality score: **{seasonality_score:.1f}/10**)"
+        )
+    elif seasonality_score >= 5.0:
+        season_ctx = (
+            f"**Fringe-season event** — {anomaly_key.replace('_',' ')} in {month_name} is unusual "
+            f"but not unprecedented for {region}. Some seasonal positioning already exists. "
+            f"(Seasonality score: **{seasonality_score:.1f}/10**)"
+        )
+    else:
+        season_ctx = (
+            f"**Peak-season event** — {anomaly_key.replace('_',' ')} is expected in {month_name} "
+            f"for {region}. The market is partially or fully pricing seasonal risk. The alpha comes "
+            f"from magnitude, not timing. (Seasonality score: **{seasonality_score:.1f}/10**)"
+        )
+
+    # ── Trend narrative ────────────────────────────────────────────────────────
+    trend_narratives = {
+        "worsening":  (
+            "**↑ Worsening** — the signal has intensified since the previous ECMWF model run. "
+            "Increasing urgency: the market has less time to position and trade conviction is at "
+            "its peak. Consider acting before the next major model run confirms the trend."
+        ),
+        "new": (
+            "**★ New** — this signal appeared for the first time in the latest ECMWF run. It is "
+            "not yet in financial media. The alpha window is at its maximum — typically **48–96 hours** "
+            "before the event appears in sell-side weather reports or financial news."
+        ),
+        "stable": (
+            "**→ Stable** — the signal has persisted across multiple consecutive model runs without "
+            "material change. The market may have partially priced this. Conviction is maintained "
+            "but the information edge is diminishing with each passing day."
+        ),
+        "recovering": (
+            "**↓ Recovering** — the weather event is easing. The supply/demand impact is already "
+            "largely priced by the market. Consider fading or trimming existing positions — the "
+            "trade thesis has likely passed its optimal entry window."
+        ),
+    }
+    trend_narrative = trend_narratives.get(trend_dir, f"Trend direction: {trend_dir.title()}")
+
+    # ── Confluence narrative ───────────────────────────────────────────────────
+    norm_anomaly_key = anomaly_key.lower().replace(" ", "_")
+    same_anomaly_df = all_df[
+        all_df["anomaly_type"].str.strip().str.lower().str.replace(" ", "_") == norm_anomaly_key
+    ]
+    same_anomaly_regions = same_anomaly_df["region"].dropna().unique().tolist()
+    if len(same_anomaly_regions) >= 3:
+        confluence_text = (
+            f"**Multi-region convergence (+1.0 bonus):** {len(same_anomaly_regions)} separate regions "
+            f"are simultaneously showing {anomaly_key.replace('_',' ')}: "
+            f"*{', '.join(same_anomaly_regions[:5])}*. "
+            f"This is a global-scale signal — commodity supply disruption across multiple production "
+            f"origins is historically one of the most powerful and durable price catalysts."
+        )
+    elif len(same_anomaly_regions) == 2:
+        confluence_text = (
+            f"**Dual-region signal (+0.5 bonus):** {' and '.join(same_anomaly_regions)} are both "
+            f"showing {anomaly_key.replace('_',' ')} simultaneously. Concurrent multi-origin "
+            f"disruption amplifies the commodity price impact beyond what either event would "
+            f"cause independently."
+        )
+    else:
+        confluence_text = (
+            f"**Single-region event (no confluence bonus):** Only {region} is showing this anomaly. "
+            f"The trade thesis is valid but lacks the multi-origin amplification that drives the "
+            f"largest commodity moves. Monitor other production regions for developing signals."
+        )
+
+    # ── Edge score narrative ───────────────────────────────────────────────────
+    media_val = best_row.get("media_validated")
+    if media_val is True:
+        edge_text = (
+            "**Edge score 3.0/10 — Closing window.** This event has been picked up by financial "
+            "media. The market is actively pricing this signal. Position sizing should reflect "
+            "reduced information advantage — the easiest gains are already made."
+        )
+    elif media_val is False:
+        edge_text = (
+            "**Edge score 9.5/10 — Maximum alpha window.** This event is NOT yet in financial "
+            "media. ECMWF is detecting it 7–10 days before news coverage typically emerges. "
+            "This is the core premise of weather-driven trading — systematic early detection "
+            "of supply/demand shocks before they appear in sell-side research."
+        )
+    else:
+        edge_text = (
+            "**Edge score 7.0/10 — Assumed pre-media.** Media validation status is unconfirmed. "
+            "Assume moderate information advantage. Before sizing a position, quickly check "
+            "Bloomberg, Reuters, and Refinitiv for any recent coverage of this weather event."
+        )
+
+    # ── Pheno narrative ────────────────────────────────────────────────────────
+    pheno_key = (top_commodity.lower().strip(), norm_anomaly_key)
+    pheno_text = PHENO_NARRATIVE.get(pheno_key, "")
+
+    # ── Trade thesis ───────────────────────────────────────────────────────────
+    long_thesis  = TRADE_THESIS.get((norm_anomaly_key, "Long"), "")
+    short_thesis = TRADE_THESIS.get((norm_anomaly_key, "Short"), "")
+
+    # ── Invalidation ──────────────────────────────────────────────────────────
+    invalidation = INVALIDATION_CONDITIONS.get(norm_anomaly_key, "")
+
+    # ── RENDER ─────────────────────────────────────────────────────────────────
+    # 1. Score decomposition table
+    st.markdown("#### 📊 Score Decomposition")
+    decomp_html = build_score_decomposition_html(
+        weather_strength=weather_strength,
+        mapping_quality=mq,
+        seasonality_score=seasonality_score,
+        trend_factor=trend_factor,
+        edge_score=edge_score,
+        execution_quality=eq,
+        conf_bonus=conf_bonus,
+        top_pheno_mult=top_pheno_mult,
+        event_score=event_score,
+        accent=accent,
+    )
+    st.markdown(decomp_html, unsafe_allow_html=True)
+
+    # 2. Z-score
+    st.markdown("#### 🔬 Weather Anomaly Intensity")
+    freq_label = _sigma_frequency_label(event_sigma)
+    st.markdown(
+        f"**{event_sigma:.2f}σ** — {freq_label}.  \n"
+        f"The Z-score measures how extreme this event is relative to the climatological mean for "
+        f"this region and time of year. Institutional weather desks typically require **≥1.5σ** before "
+        f"entering a weather-driven trade; **≥2.0σ** events are where the largest market "
+        f"mispricings historically occur because consensus forecasters treat them as outliers."
+    )
+
+    # 3. Seasonal context
+    st.markdown("#### 📅 Seasonal Context")
+    st.markdown(season_ctx)
+
+    # 4. Trend
+    st.markdown("#### 📈 Signal Trend")
+    st.markdown(trend_narrative)
+
+    # 5. Pheno
+    if pheno_text:
+        st.markdown("#### 🌱 Crop & Demand Stage")
+        stage_str = f" — **{top_pheno_stage}** ({top_pheno_mult:.1f}×)" if top_pheno_stage else f" ({top_pheno_mult:.1f}×)"
+        st.markdown(f"**{top_commodity.title()}{stage_str}**  \n{pheno_text}")
+
+    # 6. Confluence
+    st.markdown("#### 🌐 Regional Confluence")
+    st.markdown(confluence_text)
+
+    # 7. Edge
+    st.markdown("#### ⚡ Information Edge")
+    st.markdown(edge_text)
+
+    # 8. Trade thesis
+    if long_thesis or short_thesis:
+        st.markdown("#### 💼 Trade Thesis")
+        if long_thesis:
+            st.markdown(f"**🟢 Long:**  \n{long_thesis}")
+        if short_thesis:
+            st.markdown(f"**🔴 Short:**  \n{short_thesis}")
+
+    # 9. Invalidation checklist
+    if invalidation:
+        st.markdown("#### ⚠️ What Would Invalidate This Signal")
+        st.markdown(invalidation)
+
+    # 10. Raw evidence (compact)
+    with st.expander("🔢 Raw weather measurements & data"):
+        ev_cols = st.columns(2)
+        ev_cols[0].markdown(f"**Vehicle:** {get_vehicle(best_row)}")
+        ev_cols[0].markdown(f"**Commodities:** {', '.join(commodities)}")
+        ev_cols[0].markdown(
+            f"**Forecast window:**  \n"
+            f"{format_dt(best_row.get('forecast_start'))} → {format_dt(best_row.get('forecast_end'))}"
+        )
+        ev_cols[1].markdown("**Trigger evidence:**")
+        for item in build_trigger_evidence(best_row):
+            ev_cols[1].caption(f"— {item}")
+        details = parse_jsonish(best_row.get("details"))
+        if isinstance(details, dict) and details:
+            st.json(details)
+
+
 def show_weather_event_card(
     event_rows: "pd.DataFrame",
     rank_number: int,
@@ -1363,64 +2148,24 @@ def show_weather_event_card(
     )
     st.markdown(card_html, unsafe_allow_html=True)
 
-    with st.expander("Score breakdown & raw data"):
-        d1, d2 = st.columns(2)
-        d1.markdown(f"**Commodities**  \n{', '.join(commodities)}")
-        d1.markdown(f"**Vehicle**  \n{get_vehicle(best_row)}")
-        d1.markdown(
-            f"**Forecast window**  \n"
-            f"{format_dt(best_row.get('forecast_start'))} → {format_dt(best_row.get('forecast_end'))}"
+    with st.expander("📖 Score breakdown & reasoning"):
+        build_detailed_reasoning(
+            best_row=best_row,
+            event_sigma=event_sigma,
+            weather_strength=weather_strength,
+            seasonality_score=seasonality_score,
+            trend_factor=trend_factor,
+            edge_score=edge_score,
+            conf_bonus=conf_bonus,
+            stock_list=stock_list,
+            event_score=event_score,
+            region=region,
+            anomaly_key=anomaly_key,
+            commodities=commodities,
+            trend_dir=trend_dir,
+            all_df=all_df,
+            accent=accent,
         )
-        # Z-score context line
-        sigma_label = (
-            "🔴 Extreme (3σ+)" if event_sigma >= 2.7
-            else "🟠 Severe (2σ+)"  if event_sigma >= 1.8
-            else "🔵 Notable (1σ+)" if event_sigma >= 1.2
-            else "⚪ Marginal (<1σ)"
-        )
-        d1.markdown(f"**Anomaly Z-Score**  \n{event_sigma:.2f}σ — {sigma_label}")
-        # Top pheno stage (from highest-scoring stock)
-        top_pheno_info = ""
-        for s in stock_list[:3]:
-            if s.get("pheno_stage"):
-                pm = s["pheno_mult"]
-                stage = s["pheno_stage"]
-                top_pheno_info = f"{stage} ({pm:.1f}×) — {s['commodity']}"
-                break
-        if top_pheno_info:
-            d1.markdown(f"**Crop Stage (top signal)**  \n{top_pheno_info}")
-
-        score_html = (
-            progress_bar_html("Weather Strength", weather_strength) +
-            progress_bar_html("Seasonality",      seasonality_score) +
-            progress_bar_html("Trend Factor",     trend_factor) +
-            progress_bar_html("Edge Score",       edge_score) +
-            progress_bar_html("Event Score",      event_score)
-        )
-        # Pheno multiplier bar: show for top stock with known pheno
-        top_pheno_mult = next((s["pheno_mult"] for s in stock_list if s.get("pheno_stage")), None)
-        if top_pheno_mult is not None:
-            pheno_pct = min(int(top_pheno_mult / 2.0 * 100), 100)
-            pheno_color = "#F39C12" if top_pheno_mult >= 1.5 else "#5DADE2" if top_pheno_mult >= 1.0 else "#555"
-            pheno_bar = (
-                f'<div style="margin-bottom:6px;">'
-                f'<div style="font-size:10px;color:#888;margin-bottom:2px;">'
-                f'Pheno Multiplier&nbsp;<span style="color:{pheno_color};font-weight:700;">{top_pheno_mult:.2f}×</span></div>'
-                f'<div style="background:#1a1a1a;border-radius:3px;height:5px;">'
-                f'<div style="background:{pheno_color};width:{pheno_pct}%;height:5px;border-radius:3px;"></div>'
-                f'</div></div>'
-            )
-            score_html = score_html + pheno_bar
-        d2.markdown(score_html, unsafe_allow_html=True)
-
-        st.markdown("**Why this signal triggered**")
-        for item in build_trigger_evidence(best_row):
-            st.caption(f"— {item}")
-
-        details = parse_jsonish(best_row.get("details"))
-        if isinstance(details, dict) and details:
-            with st.expander("Raw weather data"):
-                st.json(details)
 
 
 # ─── Data load ────────────────────────────────────────────────────────────────
