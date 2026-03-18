@@ -1,10 +1,51 @@
 from ecmwf.opendata import Client
 from datetime import datetime, timedelta, timezone
+import time
+import random
 import xarray as xr
 import pandas as pd
 import numpy as np
 
 client = Client(source="aws")
+
+# ─── Download config ──────────────────────────────────────────────────────────
+MIN_RUNS_REQUIRED = 2          # proceed as long as we get at least this many
+TARGET_RUNS       = 5          # ideal number of historical runs
+MAX_RETRIES       = 4          # per-date retry attempts on SlowDown/throttle
+RETRY_BASE_DELAY  = 15         # seconds — doubles each retry (15, 30, 60, 120)
+INTER_DOWNLOAD_DELAY = (5, 12) # random sleep (seconds) between successful downloads
+
+
+def retrieve_with_backoff(date_str: str, hh: int, filename: str) -> bool:
+    """
+    Download one ECMWF GRIB file, retrying with exponential back-off on
+    S3 SlowDown (rate-limit) responses.  Returns True on success.
+    """
+    for attempt in range(MAX_RETRIES):
+        try:
+            client.retrieve(
+                date=int(date_str),
+                time=hh,
+                stream="oper",
+                type="fc",
+                step=[24, 48, 72, 96, 120],
+                param=["2t", "tp", "10u", "10v", "msl"],
+                target=filename,
+            )
+            return True
+        except Exception as exc:
+            err = str(exc)
+            is_slowdown = "SlowDown" in err or "reduce your request rate" in err.lower()
+            if is_slowdown and attempt < MAX_RETRIES - 1:
+                wait = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 5)
+                print(f"  S3 SlowDown for {date_str}/{hh:02d}h — retrying in {wait:.0f}s "
+                      f"(attempt {attempt + 1}/{MAX_RETRIES - 1})")
+                time.sleep(wait)
+            else:
+                # Non-SlowDown error (date not available yet) or exhausted retries
+                print(f"  Skipping {date_str}/{hh:02d}h after {attempt + 1} attempt(s): {exc}")
+                return False
+    return False
 
 
 def candidate_00z_runs():
@@ -124,24 +165,26 @@ found = []
 
 for date_str, hh in candidate_00z_runs():
     filename = f"run_{date_str}_{hh:02d}.grib2"
-    try:
-        client.retrieve(
-            date=int(date_str),
-            time=hh,
-            stream="oper",
-            type="fc",
-            step=[24, 48, 72, 96, 120],
-            param=["2t", "tp", "10u", "10v", "msl"],
-            target=filename,
-        )
+    print(f"Fetching ECMWF run {date_str}/{hh:02d}h …")
+    if retrieve_with_backoff(date_str, hh, filename):
         found.append((date_str, hh, filename))
-        if len(found) == 5:
+        print(f"  ✓ {date_str}/{hh:02d}h — {len(found)}/{TARGET_RUNS} collected")
+        if len(found) == TARGET_RUNS:
             break
-    except Exception:
-        continue
+        # Polite pause between successful downloads to stay under S3 rate limits
+        if len(found) < TARGET_RUNS:
+            pause = random.uniform(*INTER_DOWNLOAD_DELAY)
+            print(f"  Pausing {pause:.1f}s before next download …")
+            time.sleep(pause)
 
-if len(found) < 5:
-    raise RuntimeError("Could not find five recent ECMWF 00Z runs.")
+if len(found) < MIN_RUNS_REQUIRED:
+    raise RuntimeError(
+        f"Could not retrieve enough recent ECMWF 00Z runs "
+        f"(got {len(found)}, need at least {MIN_RUNS_REQUIRED})."
+    )
+
+if len(found) < TARGET_RUNS:
+    print(f"⚠️  Only {len(found)} of {TARGET_RUNS} runs available — proceeding with partial history.")
 
 run_rows = []
 
@@ -193,10 +236,15 @@ latest = history_df.iloc[-1].drop(labels=["run_date", "run_time"])
 latest_df = pd.DataFrame({"metric": latest.index, "value": latest.values})
 latest_df.to_csv("weather_values.csv", index=False)
 
-prev = history_df.iloc[-2].drop(labels=["run_date", "run_time"])
+# Write previous run if we have at least 2; otherwise copy latest as fallback
+if len(history_df) >= 2:
+    prev = history_df.iloc[-2].drop(labels=["run_date", "run_time"])
+else:
+    print("⚠️  Only one run available — using latest as both current and previous.")
+    prev = latest
 prev_df = pd.DataFrame({"metric": prev.index, "value": prev.values})
 prev_df.to_csv("weather_values_prev.csv", index=False)
 
-print("weather_values.csv updated from ECMWF last-5-runs model")
+print(f"weather_values.csv updated from ECMWF (last {len(history_df)} run(s))")
 print(latest_df)
-print("\nSaved weather_history.csv with last 5 runs.")
+print(f"\nSaved weather_history.csv with {len(history_df)} run(s).")
