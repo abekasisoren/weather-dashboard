@@ -1179,8 +1179,9 @@ for col in ["signal_level", "persistence_score", "severity_score", "market_score
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-# Normalise anomaly_type casing — eliminates duplicates like "Drought" vs "drought"
+# Normalise anomaly_type and region — eliminates groupby duplicates from whitespace/casing
 df["anomaly_type"] = df["anomaly_type"].str.lower().str.strip()
+df["region"] = df["region"].str.strip()  # strip whitespace; keep original casing for display
 
 df["weather_strength"] = df.apply(compute_weather_strength, axis=1)
 df["trade_display"] = df.apply(infer_trade, axis=1)
@@ -1297,9 +1298,19 @@ with tab_radar:
             event_score = float(grp["preview_score"].max())
             event_groups.append((event_score, grp))
 
-        # Sort events by best score, take top N
+        # Sort events by best score; deduplicate safety net for any residual casing collisions
         event_groups.sort(key=lambda x: x[0], reverse=True)
-        event_groups = event_groups[:top_n]
+        seen_event_keys: set = set()
+        deduped: list = []
+        for _score, _grp in event_groups:
+            key = (
+                _grp["region"].iloc[0].strip().lower(),
+                _grp["anomaly_type"].iloc[0].strip().lower(),
+            )
+            if key not in seen_event_keys:
+                seen_event_keys.add(key)
+                deduped.append((_score, _grp))
+        event_groups = deduped[:top_n]
 
         # Render 2-column grid of weather-event cards
         for i in range(0, len(event_groups), 2):
