@@ -853,31 +853,19 @@ def build_ranked_trade_table(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def show_trade_card(row, rank_number=None):
-    title = build_title(row)
-    prefix = f"#{rank_number} " if rank_number is not None else ""
-
+    """Minimal 2-column-grid-friendly trade card."""
     trade, symbols = get_stock_trade_symbols(row)
     best_symbol = symbols[0] if symbols else ""
-    weather_strength = compute_weather_strength(row)
-    mapping_quality = compute_mapping_quality(row, best_symbol, trade) if best_symbol else 0.0
+
+    weather_strength  = compute_weather_strength(row)
+    mapping_quality   = compute_mapping_quality(row, best_symbol, trade) if best_symbol else 0.0
     execution_quality = compute_execution_quality(row, best_symbol) if best_symbol else 0.0
     seasonality_score = compute_seasonality_score(row)
-    trend_factor = compute_trend_factor(row)
-    trend_dir = normalize_text(row.get("trend_direction", ""), "new")
-    media_val = row.get("media_validated")
-    is_new_signal = False
-    try:
-        created = pd.to_datetime(row.get("created_at"), errors="coerce")
-        if not pd.isna(created):
-            import datetime
-            now = pd.Timestamp.now(tz="UTC")
-            if created.tzinfo is None:
-                created = created.tz_localize("UTC")
-            is_new_signal = (now - created).total_seconds() < 86400
-    except Exception:
-        pass
+    trend_factor      = compute_trend_factor(row)
+    trend_dir         = normalize_text(row.get("trend_direction", ""), "new")
+    media_val         = row.get("media_validated")
 
-    final_trade_score = compute_final_trade_score(
+    final_score = compute_final_trade_score(
         weather_strength=weather_strength,
         mapping_quality=mapping_quality,
         conflict_cleanliness=10.0,
@@ -885,52 +873,112 @@ def show_trade_card(row, rank_number=None):
         seasonality_score=seasonality_score,
         trend_factor=trend_factor,
     )
-    bucket = score_bucket(int(round(final_trade_score)))
+    bucket = score_bucket(int(round(final_score)))
 
-    new_tag = " ⚡" if is_new_signal else ""
-    st.markdown(f"### {prefix}{title}{new_tag}")
+    # ── Visual variables ──────────────────────────────────────────────────────
+    is_long   = trade == "Long"
+    accent    = "#2ECC71" if is_long else "#E74C3C"   # green / red
+    direction = "▲ LONG"  if is_long else "▼ SHORT"
 
-    badge_parts = [trade_badge(trade), conviction_badge(bucket), trend_badge(trend_dir)]
-    if media_val is True:
-        badge_parts.append(media_badge())
-    st.markdown(" &nbsp; ".join(badge_parts), unsafe_allow_html=True)
+    trend_map = {
+        "worsening":  "↑ Worsening",
+        "new":        "★ New",
+        "stable":     "→ Stable",
+        "recovering": "↓ Recovering",
+    }
+    trend_label = trend_map.get(trend_dir, trend_dir.title())
 
-    st.markdown(f"**Commodity Trade:** {get_commodity_trade(row)}")
-    st.markdown(f"**Stock Trade:** {get_stock_trade(row)}")
-    st.markdown(f"**Vehicle:** {get_vehicle(row)}")
-    st.markdown(f"**Why this matters:** {get_why_it_matters(row)}")
-    st.markdown(f"**Final Trade Score:** {round(final_trade_score, 2)} / 10")
-    st.markdown(f"**Forecast Window:** {format_dt(row.get('forecast_start'))} → {format_dt(row.get('forecast_end'))}")
+    region  = normalize_text(row.get("region", ""), "—").replace("_", " ").title()
+    anomaly = normalize_anomaly_display(
+        normalize_text(row.get("anomaly_type", ""), "—")
+    )
+    commodity = normalize_text(row.get("commodity", ""), "—").replace("_", " ").title()
+    why       = get_why_it_matters(row)
+    why_short = (why[:130] + "…") if len(why) > 130 else why
 
-    with st.expander("Score breakdown & details"):
+    stocks_str = "  ·  ".join(symbols[:5]) if symbols else "—"
+    rank_str   = f"#{rank_number}" if rank_number else ""
+    media_str  = "  📰 CONFIRMED" if media_val is True else ""
+    score_pct  = min(int(final_score * 10), 100)
+
+    card_html = f"""
+    <div style="
+        border-left: 3px solid {accent};
+        border-radius: 6px;
+        background: rgba(255,255,255,0.03);
+        padding: 16px 18px 14px 18px;
+        margin-bottom: 2px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    ">
+        <!-- header row: rank+conviction  |  score -->
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
+            <div>
+                <span style="font-size:10px; font-weight:700; color:#888;
+                             letter-spacing:1px; text-transform:uppercase;">
+                    {rank_str}&nbsp;&nbsp;{bucket}{media_str}
+                </span>
+            </div>
+            <div style="text-align:right; line-height:1;">
+                <span style="font-size:26px; font-weight:700; color:white;">{final_score:.1f}</span>
+                <span style="font-size:11px; color:#555;">&thinsp;/10</span>
+            </div>
+        </div>
+
+        <!-- title row -->
+        <div style="font-size:15px; font-weight:600; color:#f0f0f0; margin-bottom:3px;">
+            {region}&nbsp;&nbsp;<span style="color:#555;">·</span>&nbsp;&nbsp;{anomaly}
+        </div>
+
+        <!-- direction + trend -->
+        <div style="font-size:12px; margin-bottom:12px;">
+            <span style="color:{accent}; font-weight:700;">{direction}</span>
+            <span style="color:#444;">&nbsp;&nbsp;·&nbsp;&nbsp;</span>
+            <span style="color:#888;">{trend_label}</span>
+            <span style="color:#444;">&nbsp;&nbsp;·&nbsp;&nbsp;</span>
+            <span style="color:#666;">{commodity}</span>
+        </div>
+
+        <!-- why it matters -->
+        <div style="font-size:12px; color:#aaa; line-height:1.6; margin-bottom:12px;">
+            {why_short}
+        </div>
+
+        <!-- score bar -->
+        <div style="background:#1a1a1a; border-radius:3px; height:3px; margin-bottom:10px;">
+            <div style="background:{accent}; width:{score_pct}%; height:3px; border-radius:3px;"></div>
+        </div>
+
+        <!-- stocks -->
+        <div style="font-size:11px; color:{accent}; font-weight:600; letter-spacing:0.5px; font-family:monospace;">
+            {stocks_str}
+        </div>
+    </div>
+    """
+    st.markdown(card_html, unsafe_allow_html=True)
+
+    with st.expander("Details & score breakdown"):
+        d1, d2 = st.columns(2)
+        d1.markdown(f"**Commodity trade**  \n{get_commodity_trade(row)}")
+        d1.markdown(f"**Vehicle**  \n{get_vehicle(row)}")
+        d1.markdown(f"**Forecast window**  \n{format_dt(row.get('forecast_start'))} → {format_dt(row.get('forecast_end'))}")
         score_html = (
-            progress_bar_html("Weather Strength", weather_strength) +
-            progress_bar_html("Mapping Quality", mapping_quality) +
+            progress_bar_html("Weather Strength",  weather_strength) +
+            progress_bar_html("Mapping Quality",   mapping_quality) +
             progress_bar_html("Execution Quality", execution_quality) +
-            progress_bar_html("Seasonality", seasonality_score) +
-            progress_bar_html("Trend Factor", trend_factor) +
-            progress_bar_html("Final Score", final_trade_score)
+            progress_bar_html("Seasonality",       seasonality_score) +
+            progress_bar_html("Trend Factor",      trend_factor) +
+            progress_bar_html("Final Score",       final_score)
         )
-        st.markdown(score_html, unsafe_allow_html=True)
+        d2.markdown(score_html, unsafe_allow_html=True)
 
         st.markdown("**Why this signal triggered**")
         for item in build_trigger_evidence(row):
-            st.write(f"- {item}")
+            st.caption(f"— {item}")
 
-        st.markdown("**Commodity recommendation**")
-        st.write(get_commodity_trade(row))
-
-        st.markdown("**Stock recommendation**")
-        st.write(get_stock_trade(row))
-
-        st.markdown("**Weather details**")
         details = parse_jsonish(row.get("details"))
         if isinstance(details, dict) and details:
-            st.json(details)
-        else:
-            st.write("No details available.")
-
-    st.divider()
+            with st.expander("Raw weather data"):
+                st.json(details)
 
 
 # ─── Data load ────────────────────────────────────────────────────────────────
@@ -1065,22 +1113,19 @@ st.caption("Early weather intelligence for markets ranked like a trading radar."
 tab_radar, tab_pulse, tab_media, tab_aftermath = st.tabs(["🌍 Radar", "📊 Pulse Trader", "📡 Media Signals", "📈 Aftermath"])
 
 with tab_radar:
-    st.header("📡 Market Radar")
-    r1, r2, r3, r4, r5, r6 = st.columns(6)
-    r1.metric("Top Long", top_long[:30] + "…" if len(top_long) > 30 else top_long)
-    r2.metric("Top Short", top_short[:30] + "…" if len(top_short) > 30 else top_short)
-    r3.metric("Prime Trades", prime_count)
-    r4.metric("⚡ New Signals", new_count)
-    r5.metric("↑ Worsening", worsening_count)
-    r6.metric("Last Update", format_dt(last_update)[:16] if last_update else "-")
 
-    st.header("🌍 Top Global Trades Right Now")
+    # ── KPI bar ───────────────────────────────────────────────────────────────
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Prime Signals",  prime_count)
+    k2.metric("New Today",      new_count)
+    k3.metric("↑ Worsening",    worsening_count)
+    k4.metric("Last Update",    format_dt(last_update)[:16] if last_update else "—")
+    st.divider()
 
+    # ── 2-column card grid ────────────────────────────────────────────────────
     if filtered.empty:
-        st.write("No trades match the current filters.")
+        st.info("No signals match the current filters.")
     else:
-        top_df = filtered.copy()
-
         def _preview_score(row):
             syms = get_stock_trade_symbols(row)
             sym0 = syms[1][0] if syms[1] else ""
@@ -1091,29 +1136,33 @@ with tab_radar:
             tf = compute_trend_factor(row)
             return compute_final_trade_score(ws, mq, 10.0, eq, ss, tf)
 
+        top_df = filtered.copy()
         top_df["preview_score"] = top_df.apply(_preview_score, axis=1)
         top_df = top_df.sort_values(
             by=["preview_score", "weather_strength", "created_at"],
             ascending=[False, False, False],
         ).head(top_n)
 
-        for idx, (_, row) in enumerate(top_df.iterrows(), start=1):
-            show_trade_card(row, rank_number=idx)
+        cards = list(top_df.iterrows())
+        for i in range(0, len(cards), 2):
+            col_l, col_r = st.columns(2, gap="medium")
+            with col_l:
+                show_trade_card(cards[i][1], rank_number=i + 1)
+            if i + 1 < len(cards):
+                with col_r:
+                    show_trade_card(cards[i + 1][1], rank_number=i + 2)
 
-    st.header("📊 Ranking Table")
-
-    if filtered_ranked.empty:
-        st.write("No signals match the current filters.")
-    else:
-        display_cols = [
-            "Region", "Commodity", "Anomaly", "Trade", "Conviction", "Trend",
-            "Vehicle", "Stock Trade", "Final Trade Score",
-        ]
-        available_cols = [c for c in display_cols if c in filtered_ranked.columns]
-        st.dataframe(filtered_ranked[available_cols], use_container_width=True, height=400)
-
-    with st.expander("Raw filtered data"):
-        st.dataframe(filtered, use_container_width=True)
+    # ── Ranking table (collapsed by default) ──────────────────────────────────
+    with st.expander("📊 Full Ranking Table"):
+        if filtered_ranked.empty:
+            st.write("No signals match the current filters.")
+        else:
+            display_cols = [
+                "Region", "Commodity", "Anomaly", "Trade", "Conviction",
+                "Trend", "Vehicle", "Stock Trade", "Final Trade Score",
+            ]
+            available_cols = [c for c in display_cols if c in filtered_ranked.columns]
+            st.dataframe(filtered_ranked[available_cols], use_container_width=True, height=380)
 
 with tab_pulse:
     st.header("🌐 Global Pulse Trader")
