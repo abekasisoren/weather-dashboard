@@ -1337,10 +1337,21 @@ with tab_aftermath:
 
     aftermath_df = st.session_state["aftermath_df"] if st.session_state["aftermath_df"] is not None else pd.DataFrame()
 
+    # ── API key status (always visible) ──────────────────────────────────────
+    import os as _os
+    _fhkey = _os.environ.get("FINNHUB_API_KEY", "")
+    if _fhkey:
+        st.success(f"✅ FINNHUB_API_KEY detected (starts: `{_fhkey[:6]}…`)")
+    else:
+        st.error(
+            "❌ FINNHUB_API_KEY is NOT visible to this server process.  \n"
+            "In Render → your service → **Environment** → confirm the variable exists, "
+            "then click **Manual Deploy → Deploy latest commit**."
+        )
+
     # ── Price fetch debug info ────────────────────────────────────────────────
     fetch_errs = get_fetch_errors()
     if fetch_errs:
-        succeeded = sum(1 for e in fetch_errs if e.startswith("✅") and "crumb" not in e.lower())
         failed = sum(1 for e in fetch_errs if e.startswith("⛔"))
         with st.expander(f"🔍 Price fetch debug — {failed} symbol(s) failed, click to inspect"):
             for line in fetch_errs:
