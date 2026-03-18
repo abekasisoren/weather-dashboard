@@ -6,40 +6,44 @@ import xarray as xr
 import pandas as pd
 import numpy as np
 
-client_aws  = Client(source="aws")
-client_ecmwf = Client(source="ecmwf")  # fallback when AWS S3 is throttling
-
 # ─── Download config ──────────────────────────────────────────────────────────
 MIN_RUNS_REQUIRED    = 2          # proceed with at least this many successful downloads
 TARGET_RUNS          = 5          # ideal number of historical runs
-MAX_RETRIES_PER_SRC  = 3          # retries per source before trying fallback
-RETRY_BASE_DELAY     = 30         # seconds — doubles each retry: 30 → 60 → 120
-INTER_DOWNLOAD_DELAY = (10, 20)   # random pause between downloads to avoid burst throttling
+MAX_RETRIES_PER_SRC  = 2          # attempts per source before trying the next mirror
+RETRY_DELAY          = 20         # seconds to wait before a same-source retry
+INTER_DOWNLOAD_DELAY = (8, 15)    # random pause between successful downloads
 
-# Consecutive AWS throttle counter — after this many back-to-back 503s, prefer ECMWF
-_aws_consecutive_throttles = 0
-AWS_THROTTLE_SWITCH_AFTER  = 2    # switch primary to ECMWF after N consecutive throttles
+# ECMWF open data is mirrored on 4 independent endpoints.
+# Source order: prefer ECMWF's own CDN first (fewest public parallel connections),
+# then Azure and Google (separate infrastructure from AWS), AWS last.
+# When a source is throttled we immediately switch to the next mirror rather than
+# waiting 120 s on the same throttled endpoint (the library's internal retry strategy).
+_SOURCES = [
+    ("ecmwf",   Client(source="ecmwf")),    # ECMWF's own data.ecmwf.int CDN
+    ("azure",   Client(source="azure")),    # Azure Blob Storage mirror
+    ("google",  Client(source="google")),   # Google Cloud Storage mirror
+    ("aws",     Client(source="aws")),      # AWS S3 (most public traffic → most throttled)
+]
 
 
 def _is_throttle_error(exc: Exception) -> bool:
     """
-    Detect rate-limit / throttle errors regardless of how the HTTP library
-    formats the status code.
+    Detect rate-limit / service-overload errors regardless of how the HTTP
+    client formats the status code.
 
-    The ecmwf.opendata library (via requests) raises:
-        HTTPError: 503 Server Error: Slow Down for url: ...
-    The raw S3 XML body also contains:
-        <Code>SlowDown</Code>
-    We catch both spellings: 'slow down' (requests) and 'slowdown' (xml).
-    Also catch any other 5xx that indicates server overload.
+    ecmwf.opendata (via requests) formats 503 as:
+        '503 Server Error: Slow Down for url: ...'
+    Raw S3/CDN XML responses contain:
+        '<Code>SlowDown</Code>'
     """
     err = str(exc).lower()
     return (
-        "slow down" in err          # requests: "503 Server Error: Slow Down"
-        or "slowdown" in err        # S3 XML: "<Code>SlowDown</Code>"
+        "slow down" in err               # requests format: "Slow Down"
+        or "slowdown" in err             # XML format: "SlowDown"
         or "reduce your request rate" in err
         or ("503" in err and "server error" in err)
-        or ("429" in err)           # Too Many Requests
+        or "429" in err                  # Too Many Requests
+        or "service unavailable" in err  # generic 503 text
     )
 
 
@@ -58,58 +62,45 @@ def _retrieve_one(client_obj: "Client", date_str: str, hh: int, filename: str) -
 
 def retrieve_with_backoff(date_str: str, hh: int, filename: str) -> bool:
     """
-    Download one ECMWF GRIB file.
+    Download one ECMWF GRIB file, trying each mirror in turn.
 
-    Strategy:
-    1. Try via AWS S3 with exponential back-off on throttle errors.
-    2. If AWS is consistently throttling (global counter), try ECMWF's own
-       servers instead — different endpoint, separate rate limits.
-    3. Non-throttle errors (date not yet published, malformed response) skip
-       immediately since retrying won't help.
+    On throttle / 503: give the same source one quick retry (RETRY_DELAY s),
+    then immediately move on to the next mirror.  This avoids the ecmwf
+    library's built-in 120 s × 500 attempts loop on the same choked endpoint.
 
-    Returns True on success, False if all attempts exhausted.
+    On non-throttle errors (date not yet published, bad response): skip that
+    source immediately and try the next — retrying won't help.
+
+    Returns True on first successful download, False when all sources fail.
     """
-    global _aws_consecutive_throttles
-
-    # Decide source order based on recent throttle history
-    if _aws_consecutive_throttles >= AWS_THROTTLE_SWITCH_AFTER:
-        sources = [(client_ecmwf, "ECMWF"), (client_aws, "AWS")]
-    else:
-        sources = [(client_aws, "AWS"), (client_ecmwf, "ECMWF")]
-
-    for client_obj, src_name in sources:
+    for src_name, client_obj in _SOURCES:
         for attempt in range(MAX_RETRIES_PER_SRC):
             try:
                 _retrieve_one(client_obj, date_str, hh, filename)
-                # Success — reset throttle counter if AWS worked
-                if src_name == "AWS":
-                    _aws_consecutive_throttles = 0
-                print(f"  ✓ {date_str}/{hh:02d}h downloaded via {src_name}")
+                print(f"  ✓ {date_str}/{hh:02d}h — {src_name.upper()}")
                 return True
 
             except Exception as exc:
                 if _is_throttle_error(exc):
-                    if src_name == "AWS":
-                        _aws_consecutive_throttles += 1
                     if attempt < MAX_RETRIES_PER_SRC - 1:
-                        wait = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 10)
                         print(
-                            f"  [{src_name}] Throttled on {date_str}/{hh:02d}h "
-                            f"(AWS throttle streak: {_aws_consecutive_throttles}) — "
-                            f"retry in {wait:.0f}s (attempt {attempt + 1}/{MAX_RETRIES_PER_SRC})"
+                            f"  [{src_name.upper()}] Throttled {date_str}/{hh:02d}h, "
+                            f"quick retry in {RETRY_DELAY}s …"
                         )
-                        time.sleep(wait)
+                        time.sleep(RETRY_DELAY + random.uniform(0, 5))
                     else:
                         print(
-                            f"  [{src_name}] Throttle retries exhausted for "
-                            f"{date_str}/{hh:02d}h — trying next source"
+                            f"  [{src_name.upper()}] Still throttled — switching mirror"
                         )
                 else:
-                    # Not a throttle: date unavailable or parse error — skip immediately
-                    print(f"  [{src_name}] Non-throttle error for {date_str}/{hh:02d}h: {exc}")
-                    break  # try next source, don't waste retry attempts
+                    # Not a throttle — date unavailable / parse error; skip this source
+                    print(
+                        f"  [{src_name.upper()}] {date_str}/{hh:02d}h unavailable: "
+                        f"{str(exc)[:120]}"
+                    )
+                    break  # move to next source immediately
 
-    print(f"  ✗ All sources failed for {date_str}/{hh:02d}h — skipping this run")
+    print(f"  ✗ {date_str}/{hh:02d}h — all 4 mirrors failed, skipping")
     return False
 
 
