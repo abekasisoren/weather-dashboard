@@ -6,45 +6,110 @@ import xarray as xr
 import pandas as pd
 import numpy as np
 
-client = Client(source="aws")
+client_aws  = Client(source="aws")
+client_ecmwf = Client(source="ecmwf")  # fallback when AWS S3 is throttling
 
 # ─── Download config ──────────────────────────────────────────────────────────
-MIN_RUNS_REQUIRED = 2          # proceed as long as we get at least this many
-TARGET_RUNS       = 5          # ideal number of historical runs
-MAX_RETRIES       = 4          # per-date retry attempts on SlowDown/throttle
-RETRY_BASE_DELAY  = 15         # seconds — doubles each retry (15, 30, 60, 120)
-INTER_DOWNLOAD_DELAY = (5, 12) # random sleep (seconds) between successful downloads
+MIN_RUNS_REQUIRED    = 2          # proceed with at least this many successful downloads
+TARGET_RUNS          = 5          # ideal number of historical runs
+MAX_RETRIES_PER_SRC  = 3          # retries per source before trying fallback
+RETRY_BASE_DELAY     = 30         # seconds — doubles each retry: 30 → 60 → 120
+INTER_DOWNLOAD_DELAY = (10, 20)   # random pause between downloads to avoid burst throttling
+
+# Consecutive AWS throttle counter — after this many back-to-back 503s, prefer ECMWF
+_aws_consecutive_throttles = 0
+AWS_THROTTLE_SWITCH_AFTER  = 2    # switch primary to ECMWF after N consecutive throttles
+
+
+def _is_throttle_error(exc: Exception) -> bool:
+    """
+    Detect rate-limit / throttle errors regardless of how the HTTP library
+    formats the status code.
+
+    The ecmwf.opendata library (via requests) raises:
+        HTTPError: 503 Server Error: Slow Down for url: ...
+    The raw S3 XML body also contains:
+        <Code>SlowDown</Code>
+    We catch both spellings: 'slow down' (requests) and 'slowdown' (xml).
+    Also catch any other 5xx that indicates server overload.
+    """
+    err = str(exc).lower()
+    return (
+        "slow down" in err          # requests: "503 Server Error: Slow Down"
+        or "slowdown" in err        # S3 XML: "<Code>SlowDown</Code>"
+        or "reduce your request rate" in err
+        or ("503" in err and "server error" in err)
+        or ("429" in err)           # Too Many Requests
+    )
+
+
+def _retrieve_one(client_obj: "Client", date_str: str, hh: int, filename: str) -> None:
+    """Single retrieve call — raises on any error."""
+    client_obj.retrieve(
+        date=int(date_str),
+        time=hh,
+        stream="oper",
+        type="fc",
+        step=[24, 48, 72, 96, 120],
+        param=["2t", "tp", "10u", "10v", "msl"],
+        target=filename,
+    )
 
 
 def retrieve_with_backoff(date_str: str, hh: int, filename: str) -> bool:
     """
-    Download one ECMWF GRIB file, retrying with exponential back-off on
-    S3 SlowDown (rate-limit) responses.  Returns True on success.
+    Download one ECMWF GRIB file.
+
+    Strategy:
+    1. Try via AWS S3 with exponential back-off on throttle errors.
+    2. If AWS is consistently throttling (global counter), try ECMWF's own
+       servers instead — different endpoint, separate rate limits.
+    3. Non-throttle errors (date not yet published, malformed response) skip
+       immediately since retrying won't help.
+
+    Returns True on success, False if all attempts exhausted.
     """
-    for attempt in range(MAX_RETRIES):
-        try:
-            client.retrieve(
-                date=int(date_str),
-                time=hh,
-                stream="oper",
-                type="fc",
-                step=[24, 48, 72, 96, 120],
-                param=["2t", "tp", "10u", "10v", "msl"],
-                target=filename,
-            )
-            return True
-        except Exception as exc:
-            err = str(exc)
-            is_slowdown = "SlowDown" in err or "reduce your request rate" in err.lower()
-            if is_slowdown and attempt < MAX_RETRIES - 1:
-                wait = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 5)
-                print(f"  S3 SlowDown for {date_str}/{hh:02d}h — retrying in {wait:.0f}s "
-                      f"(attempt {attempt + 1}/{MAX_RETRIES - 1})")
-                time.sleep(wait)
-            else:
-                # Non-SlowDown error (date not available yet) or exhausted retries
-                print(f"  Skipping {date_str}/{hh:02d}h after {attempt + 1} attempt(s): {exc}")
-                return False
+    global _aws_consecutive_throttles
+
+    # Decide source order based on recent throttle history
+    if _aws_consecutive_throttles >= AWS_THROTTLE_SWITCH_AFTER:
+        sources = [(client_ecmwf, "ECMWF"), (client_aws, "AWS")]
+    else:
+        sources = [(client_aws, "AWS"), (client_ecmwf, "ECMWF")]
+
+    for client_obj, src_name in sources:
+        for attempt in range(MAX_RETRIES_PER_SRC):
+            try:
+                _retrieve_one(client_obj, date_str, hh, filename)
+                # Success — reset throttle counter if AWS worked
+                if src_name == "AWS":
+                    _aws_consecutive_throttles = 0
+                print(f"  ✓ {date_str}/{hh:02d}h downloaded via {src_name}")
+                return True
+
+            except Exception as exc:
+                if _is_throttle_error(exc):
+                    if src_name == "AWS":
+                        _aws_consecutive_throttles += 1
+                    if attempt < MAX_RETRIES_PER_SRC - 1:
+                        wait = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 10)
+                        print(
+                            f"  [{src_name}] Throttled on {date_str}/{hh:02d}h "
+                            f"(AWS throttle streak: {_aws_consecutive_throttles}) — "
+                            f"retry in {wait:.0f}s (attempt {attempt + 1}/{MAX_RETRIES_PER_SRC})"
+                        )
+                        time.sleep(wait)
+                    else:
+                        print(
+                            f"  [{src_name}] Throttle retries exhausted for "
+                            f"{date_str}/{hh:02d}h — trying next source"
+                        )
+                else:
+                    # Not a throttle: date unavailable or parse error — skip immediately
+                    print(f"  [{src_name}] Non-throttle error for {date_str}/{hh:02d}h: {exc}")
+                    break  # try next source, don't waste retry attempts
+
+    print(f"  ✗ All sources failed for {date_str}/{hh:02d}h — skipping this run")
     return False
 
 
