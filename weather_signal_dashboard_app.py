@@ -963,35 +963,88 @@ def build_ranked_trade_table(df: pd.DataFrame) -> pd.DataFrame:
     return ranked_df
 
 
-def show_trade_card(row, rank_number=None):
-    """Minimal 2-column-grid-friendly trade card."""
-    trade, symbols = get_stock_trade_symbols(row)
-    best_symbol = symbols[0] if symbols else ""
+def show_weather_event_card(event_rows: "pd.DataFrame", rank_number: int, all_df: "pd.DataFrame"):
+    """
+    Radar card focused on the weather EVENT (region + anomaly type).
+    Shows all affected equities across every commodity in the event group,
+    ranked by their individual trading scores.
+    """
+    best_row = event_rows.sort_values("signal_level", ascending=False).iloc[0]
 
-    weather_strength  = compute_weather_strength(row)
-    mapping_quality   = compute_mapping_quality(row, best_symbol, trade) if best_symbol else 0.0
-    execution_quality = compute_execution_quality(row, best_symbol) if best_symbol else 0.0
-    seasonality_score = compute_seasonality_score(row)
-    trend_factor      = compute_trend_factor(row)
-    edge_score        = compute_edge_score(row)
-    trend_dir         = normalize_text(row.get("trend_direction", ""), "new")
-    media_val         = row.get("media_validated")
+    region    = normalize_text(best_row.get("region", ""), "—").replace("_", " ").title()
+    anomaly_raw = normalize_text(best_row.get("anomaly_type", ""), "—")
+    anomaly   = anomaly_raw.replace("_", " ").title()
+    trend_dir = normalize_text(best_row.get("trend_direction", ""), "new")
+    media_val = best_row.get("media_validated")
 
-    final_score = compute_final_trade_score(
-        weather_strength=weather_strength,
-        mapping_quality=mapping_quality,
-        conflict_cleanliness=10.0,
-        execution_quality=execution_quality,
-        seasonality_score=seasonality_score,
-        trend_factor=trend_factor,
-        edge_score=edge_score,
-    )
-    bucket = score_bucket(int(round(final_score)))
+    # Weather-level scoring (shared by all stocks in this event)
+    weather_strength  = compute_weather_strength(best_row)
+    seasonality_score = compute_seasonality_score(best_row)
+    trend_factor      = compute_trend_factor(best_row)
+    edge_score        = compute_edge_score(best_row)
+    anomaly_key       = normalize_anomaly_key(anomaly_raw)
+    conf_bonus        = compute_confluence_bonus(all_df, anomaly_key)
 
-    # ── Visual variables ──────────────────────────────────────────────────────
-    is_long   = trade == "Long"
-    accent    = "#2ECC71" if is_long else "#E74C3C"   # green / red
-    direction = "▲ LONG"  if is_long else "▼ SHORT"
+    # Collect ALL affected stocks across every commodity row in this event
+    stock_list = []
+    seen_symbols: set = set()
+    for _, row in event_rows.iterrows():
+        trade, symbols = get_stock_trade_symbols(row)
+        if not symbols or trade == "No Trade":
+            continue
+        commodity_label = normalize_text(row.get("commodity", ""), "")
+        for sym in symbols:
+            if sym in seen_symbols:
+                continue
+            seen_symbols.add(sym)
+            mq = compute_mapping_quality(row, sym, trade)
+            eq = compute_execution_quality(row, sym)
+            score = compute_final_trade_score(
+                weather_strength=weather_strength,
+                mapping_quality=mq,
+                conflict_cleanliness=10.0,
+                execution_quality=eq,
+                seasonality_score=seasonality_score,
+                trend_factor=trend_factor,
+                edge_score=edge_score,
+                confluence_bonus=conf_bonus,
+            )
+            candidate = get_symbol_candidate(row, sym, trade.lower()) or {}
+            role = candidate.get("role", commodity_label).replace("_", " ")
+            stock_list.append({
+                "symbol": sym,
+                "direction": trade,
+                "score": round(score, 1),
+                "role": role,
+                "commodity": commodity_label,
+            })
+
+    # Sort stocks by score descending
+    stock_list.sort(key=lambda x: x["score"], reverse=True)
+
+    # Event-level score = top stock score (or weather strength if no stocks)
+    event_score = stock_list[0]["score"] if stock_list else round(weather_strength, 1)
+    bucket      = score_bucket(int(round(event_score)))
+
+    # Commodities this event covers
+    commodities = sorted({
+        normalize_text(r.get("commodity", ""), "")
+        for _, r in event_rows.iterrows()
+        if normalize_text(r.get("commodity", ""), "")
+    })
+
+    # Explanation from the best row
+    why = get_why_it_matters(best_row)
+
+    # Accent colour: green if mostly longs, red if mostly shorts, amber if mixed
+    n_long  = sum(1 for s in stock_list if s["direction"] == "Long")
+    n_short = sum(1 for s in stock_list if s["direction"] == "Short")
+    if n_long >= n_short and n_long:
+        accent = "#2ECC71"
+    elif n_short > n_long:
+        accent = "#E74C3C"
+    else:
+        accent = "#F39C12"
 
     trend_map = {
         "worsening":  "↑ Worsening",
@@ -999,66 +1052,78 @@ def show_trade_card(row, rank_number=None):
         "stable":     "→ Stable",
         "recovering": "↓ Recovering",
     }
-    trend_label = trend_map.get(trend_dir, trend_dir.title())
+    trend_label  = trend_map.get(trend_dir, trend_dir.title())
+    rank_str     = f"#{rank_number}" if rank_number else ""
+    media_str    = "&nbsp;&nbsp;📰 CONFIRMED" if media_val is True else ""
+    score_pct    = min(int(event_score * 10), 100)
+    commodities_str = "  ·  ".join(commodities)
 
-    region  = normalize_text(row.get("region", ""), "—").replace("_", " ").title()
-    anomaly = normalize_text(row.get("anomaly_type", ""), "—").replace("_", " ").title()
-    commodity = normalize_text(row.get("commodity", ""), "—").replace("_", " ").title()
-    why       = get_why_it_matters(row)
-    why_short = (why[:130] + "…") if len(why) > 130 else why
-
-    stocks_str = "  ·  ".join(symbols[:5]) if symbols else "—"
-    rank_str   = f"#{rank_number}" if rank_number else ""
-    media_str  = "  📰 CONFIRMED" if media_val is True else ""
-    score_pct  = min(int(final_score * 10), 100)
+    # Build individual stock rows
+    stock_rows_html = ""
+    for s in stock_list[:10]:
+        d_color = "#2ECC71" if s["direction"] == "Long" else "#E74C3C"
+        d_arrow = "▲" if s["direction"] == "Long" else "▼"
+        stock_rows_html += (
+            f'<div style="display:flex;align-items:center;gap:8px;padding:3px 0;'
+            f'border-bottom:1px solid rgba(255,255,255,0.04);">'
+            f'<span style="color:{d_color};font-size:10px;font-weight:900;width:12px;flex-shrink:0;">{d_arrow}</span>'
+            f'<span style="font-family:monospace;font-size:12px;font-weight:700;color:#f0f0f0;width:48px;flex-shrink:0;">{s["symbol"]}</span>'
+            f'<span style="font-size:11px;font-weight:700;color:{d_color};width:28px;flex-shrink:0;">{s["score"]:.1f}</span>'
+            f'<span style="font-size:10px;color:#555;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">{s["role"]}</span>'
+            f'</div>'
+        )
 
     card_html = (
         f'<div style="border-left:3px solid {accent};border-radius:6px;'
         f'background:rgba(255,255,255,0.03);padding:16px 18px 14px 18px;'
         f'margin-bottom:2px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
-        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">'
-        f'<span style="font-size:10px;font-weight:700;color:#888;letter-spacing:1px;text-transform:uppercase;">'
+
+        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">'
+        f'<span style="font-size:10px;font-weight:700;color:#666;letter-spacing:1px;text-transform:uppercase;">'
         f'{rank_str}&nbsp;&nbsp;{bucket}{media_str}</span>'
         f'<div style="text-align:right;line-height:1;">'
-        f'<span style="font-size:26px;font-weight:700;color:white;">{final_score:.1f}</span>'
-        f'<span style="font-size:11px;color:#555;">&thinsp;/10</span></div></div>'
-        f'<div style="font-size:15px;font-weight:600;color:#f0f0f0;margin-bottom:3px;">'
-        f'{region}&nbsp;&nbsp;<span style="color:#555;">·</span>&nbsp;&nbsp;{anomaly}</div>'
-        f'<div style="font-size:12px;margin-bottom:12px;">'
-        f'<span style="color:{accent};font-weight:700;">{direction}</span>'
-        f'<span style="color:#444;">&nbsp;&nbsp;·&nbsp;&nbsp;</span>'
-        f'<span style="color:#888;">{trend_label}</span>'
-        f'<span style="color:#444;">&nbsp;&nbsp;·&nbsp;&nbsp;</span>'
-        f'<span style="color:#666;">{commodity}</span></div>'
-        f'<div style="font-size:12px;color:#aaa;line-height:1.6;margin-bottom:12px;">{why_short}</div>'
-        f'<div style="background:#1a1a1a;border-radius:3px;height:3px;margin-bottom:10px;">'
-        f'<div style="background:{accent};width:{score_pct}%;height:3px;border-radius:3px;"></div></div>'
-        f'<div style="font-size:11px;color:{accent};font-weight:600;letter-spacing:0.5px;font-family:monospace;">'
-        f'{stocks_str}</div></div>'
+        f'<span style="font-size:26px;font-weight:700;color:white;">{event_score:.1f}</span>'
+        f'<span style="font-size:11px;color:#555;">&thinsp;/10</span>'
+        f'</div></div>'
+
+        f'<div style="font-size:17px;font-weight:700;color:#f0f0f0;margin-bottom:2px;">{region}</div>'
+        f'<div style="font-size:13px;font-weight:700;color:{accent};letter-spacing:0.3px;margin-bottom:4px;">{anomaly}</div>'
+        f'<div style="font-size:11px;color:#666;margin-bottom:10px;">'
+        f'<span style="color:#888;">{trend_label}</span>&nbsp;&nbsp;·&nbsp;&nbsp;{commodities_str}</div>'
+
+        f'<div style="font-size:12px;color:#888;line-height:1.7;margin-bottom:12px;">{why}</div>'
+
+        f'<div style="background:#1a1a1a;border-radius:3px;height:2px;margin-bottom:12px;">'
+        f'<div style="background:{accent};width:{score_pct}%;height:2px;border-radius:3px;"></div></div>'
+
+        f'<div style="font-size:9px;font-weight:700;color:#444;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;">AFFECTED MARKETS</div>'
+        + stock_rows_html +
+        f'</div>'
     )
     st.markdown(card_html, unsafe_allow_html=True)
 
-    with st.expander("Details & score breakdown"):
+    with st.expander("Score breakdown & raw data"):
         d1, d2 = st.columns(2)
-        d1.markdown(f"**Commodity trade**  \n{get_commodity_trade(row)}")
-        d1.markdown(f"**Vehicle**  \n{get_vehicle(row)}")
-        d1.markdown(f"**Forecast window**  \n{format_dt(row.get('forecast_start'))} → {format_dt(row.get('forecast_end'))}")
+        d1.markdown(f"**Commodities**  \n{', '.join(commodities)}")
+        d1.markdown(f"**Vehicle**  \n{get_vehicle(best_row)}")
+        d1.markdown(
+            f"**Forecast window**  \n"
+            f"{format_dt(best_row.get('forecast_start'))} → {format_dt(best_row.get('forecast_end'))}"
+        )
         score_html = (
-            progress_bar_html("Weather Strength",  weather_strength) +
-            progress_bar_html("Mapping Quality",   mapping_quality) +
-            progress_bar_html("Execution Quality", execution_quality) +
-            progress_bar_html("Seasonality",       seasonality_score) +
-            progress_bar_html("Trend Factor",      trend_factor) +
-            progress_bar_html("Edge Score",        edge_score) +
-            progress_bar_html("Final Score",       final_score)
+            progress_bar_html("Weather Strength", weather_strength) +
+            progress_bar_html("Seasonality",      seasonality_score) +
+            progress_bar_html("Trend Factor",     trend_factor) +
+            progress_bar_html("Edge Score",       edge_score) +
+            progress_bar_html("Event Score",      event_score)
         )
         d2.markdown(score_html, unsafe_allow_html=True)
 
         st.markdown("**Why this signal triggered**")
-        for item in build_trigger_evidence(row):
+        for item in build_trigger_evidence(best_row):
             st.caption(f"— {item}")
 
-        details = parse_jsonish(row.get("details"))
+        details = parse_jsonish(best_row.get("details"))
         if isinstance(details, dict) and details:
             with st.expander("Raw weather data"):
                 st.json(details)
@@ -1205,10 +1270,11 @@ with tab_radar:
     k4.metric("Last Update",    format_dt(last_update)[:16] if last_update else "—")
     st.divider()
 
-    # ── 2-column card grid ────────────────────────────────────────────────────
+    # ── Weather-event card grid ────────────────────────────────────────────────
     if filtered.empty:
         st.info("No signals match the current filters.")
     else:
+        # Per-row preview score (used only for sorting within a group)
         def _preview_score(row):
             syms = get_stock_trade_symbols(row)
             sym0 = syms[1][0] if syms[1] else ""
@@ -1217,23 +1283,32 @@ with tab_radar:
             eq = compute_execution_quality(row, sym0) if sym0 else 0.0
             ss = compute_seasonality_score(row)
             tf = compute_trend_factor(row)
-            return compute_final_trade_score(ws, mq, 10.0, eq, ss, tf)
+            es = compute_edge_score(row)
+            return compute_final_trade_score(ws, mq, 10.0, eq, ss, tf, edge_score=es)
 
         top_df = filtered.copy()
         top_df["preview_score"] = top_df.apply(_preview_score, axis=1)
-        top_df = top_df.sort_values(
-            by=["preview_score", "weather_strength", "created_at"],
-            ascending=[False, False, False],
-        ).head(top_n)
 
-        cards = list(top_df.iterrows())
-        for i in range(0, len(cards), 2):
+        # Group rows by (region, anomaly_type) — each group = one weather event
+        event_groups = []
+        for (region_key, anomaly_key), grp in top_df.groupby(
+            ["region", "anomaly_type"], sort=False
+        ):
+            event_score = float(grp["preview_score"].max())
+            event_groups.append((event_score, grp))
+
+        # Sort events by best score, take top N
+        event_groups.sort(key=lambda x: x[0], reverse=True)
+        event_groups = event_groups[:top_n]
+
+        # Render 2-column grid of weather-event cards
+        for i in range(0, len(event_groups), 2):
             col_l, col_r = st.columns(2, gap="medium")
             with col_l:
-                show_trade_card(cards[i][1], rank_number=i + 1)
-            if i + 1 < len(cards):
+                show_weather_event_card(event_groups[i][1], rank_number=i + 1, all_df=filtered)
+            if i + 1 < len(event_groups):
                 with col_r:
-                    show_trade_card(cards[i + 1][1], rank_number=i + 2)
+                    show_weather_event_card(event_groups[i + 1][1], rank_number=i + 2, all_df=filtered)
 
     # ── Ranking table (collapsed by default) ──────────────────────────────────
     with st.expander("📊 Full Ranking Table"):
