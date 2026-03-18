@@ -70,8 +70,8 @@ BASE_WEATHER_MARKET_MAP = {
     },
 
     "drought": {
-        "commodities": ["corn", "soybeans", "wheat", "coffee", "sugar"],
-        "vehicles_preferred": ["CORN", "SOYB", "WEAT", "JO", "CANE"],
+        "commodities": ["corn", "soybeans", "wheat", "coffee", "sugar", "copper", "lithium"],
+        "vehicles_preferred": ["CORN", "SOYB", "WEAT", "JO", "CANE", "COPX"],
         "sectors": [
             "fertilizer",
             "agriculture",
@@ -79,22 +79,33 @@ BASE_WEATHER_MARKET_MAP = {
             "soft_commodities",
             "beverages",
             "water_infrastructure",
+            "copper_mining",
+            "lithium_mining",
         ],
         "long_candidates": [
             _candidate("ADM", "long", "grain_trading", 1, 0.95, "Direct grains/softs supply stress linkage"),
             _candidate("BG", "long", "grain_trading", 1, 0.95, "Direct grains/softs supply stress linkage"),
+            _candidate("FCX", "long", "copper_mining", 1, 0.88, "Drought disrupts water-intensive copper mining — supply shock"),
+            _candidate("SCCO", "long", "copper_mining", 1, 0.88, "Southern Copper — Andes mining water dependency"),
+            _candidate("ALB", "long", "lithium_mining", 1, 0.85, "Lithium brine operations require water — drought = supply stress"),
             _candidate("CF", "long", "fertilizer", 2, 0.75, "Crop stress can support ag input theme"),
             _candidate("MOS", "long", "fertilizer", 2, 0.75, "Crop stress can support ag input theme"),
             _candidate("NTR", "long", "fertilizer", 2, 0.72, "Nutrien fertilizer linkage"),
             _candidate("CTVA", "long", "crop_inputs", 2, 0.70, "Crop input exposure"),
             _candidate("AWK", "long", "water_infrastructure", 1, 0.88, "Water utility demand surges in drought conditions"),
             _candidate("XYL", "long", "water_engineering", 2, 0.72, "Water management / drought infrastructure"),
+            _candidate("SQM", "long", "lithium_mining", 2, 0.72, "SQM — Andes lithium, water-intensive operations"),
+            _candidate("BHP", "long", "diversified_mining", 2, 0.68, "Diversified miner — copper/iron drought exposure"),
+            _candidate("RIO", "long", "diversified_mining", 2, 0.65, "Rio Tinto — copper/aluminum drought exposure"),
             _candidate("SBUX", "long", "coffee_price_pass_through", 3, 0.25, "Very indirect; usually not top trading expression"),
             _candidate("CZZ", "long", "sugar_exposure", 2, 0.60, "Sugar linkage more direct than consumer names"),
             _candidate("MDLZ", "long", "cocoa_cost_pass_through", 3, 0.30, "Cocoa/wheat cost pass-through angle"),
             _candidate("HSY", "long", "cocoa_consumer", 3, 0.28, "Cocoa input cost sensitivity"),
         ],
-        "short_candidates": [],
+        "short_candidates": [
+            _candidate("BEP", "short", "hydropower", 2, 0.72, "Brookfield Renewable — drought reduces hydro generation output"),
+            _candidate("AES", "short", "hydropower", 2, 0.68, "AES Corp — significant hydro exposure, drought headwind"),
+        ],
     },
 
     "flood": {
@@ -163,8 +174,11 @@ BASE_WEATHER_MARKET_MAP = {
             "insurance",
             "water_engineering",
             "homebuilder",
+            "hydropower",
         ],
         "long_candidates": [
+            _candidate("BEP", "long", "hydropower", 1, 0.82, "Brookfield Renewable — heavy rainfall boosts hydro reservoir levels"),
+            _candidate("AES", "long", "hydropower", 2, 0.75, "AES Corp — hydro generation benefits from heavy rainfall"),
             _candidate("CAT", "long", "infrastructure_repair", 2, 0.65, "Potential repair demand"),
             _candidate("VMC", "long", "construction_materials", 2, 0.70, "Repair/materials angle"),
             _candidate("MLM", "long", "construction_materials", 2, 0.70, "Repair/materials angle"),
@@ -190,6 +204,7 @@ BASE_WEATHER_MARKET_MAP = {
             "insurance",
             "reinsurance",
             "infrastructure_repair",
+            "cruise",
         ],
         "long_candidates": [
             _candidate("GNRC", "long", "generators", 1, 0.95, "One of the cleanest hurricane trades"),
@@ -213,6 +228,9 @@ BASE_WEATHER_MARKET_MAP = {
             _candidate("RNR", "short", "reinsurance", 1, 0.92, "Catastrophe reinsurance — hurricane is the top peril"),
             _candidate("AXS", "short", "reinsurance", 2, 0.78, "Specialty lines hurricane exposure"),
             _candidate("MKL", "short", "specialty_insurance", 2, 0.70, "Specialty insurance claims"),
+            _candidate("RCL", "short", "cruise", 1, 0.92, "Royal Caribbean — direct itinerary cancellations, port closures"),
+            _candidate("CCL", "short", "cruise", 1, 0.90, "Carnival Corp — Caribbean route hurricane losses"),
+            _candidate("NCLH", "short", "cruise", 2, 0.82, "Norwegian Cruise — Caribbean itinerary exposure"),
         ],
     },
 
@@ -226,6 +244,7 @@ BASE_WEATHER_MARKET_MAP = {
             "energy",
             "insurance",
             "reinsurance",
+            "cruise",
         ],
         "long_candidates": [
             _candidate("GNRC", "long", "generators", 1, 0.95, "Clean storm preparation trade"),
@@ -244,6 +263,9 @@ BASE_WEATHER_MARKET_MAP = {
             _candidate("CB", "short", "insurance", 1, 0.90, "Claims sensitivity"),
             _candidate("RNR", "short", "reinsurance", 1, 0.90, "Cat reinsurance loss exposure"),
             _candidate("AXS", "short", "reinsurance", 2, 0.75, "Specialty lines hurricane exposure"),
+            _candidate("RCL", "short", "cruise", 1, 0.88, "Royal Caribbean — itinerary cancellations, port disruptions"),
+            _candidate("CCL", "short", "cruise", 1, 0.85, "Carnival Corp — Caribbean route hurricane exposure"),
+            _candidate("NCLH", "short", "cruise", 2, 0.80, "Norwegian Cruise — Caribbean itinerary disruption"),
         ],
     },
 
@@ -359,6 +381,7 @@ BASE_WEATHER_MARKET_MAP = {
             "gas_producers",
             "airlines",
             "hvac_heating",
+            "ski_resorts",
         ],
         "long_candidates": [
             _candidate("EQT", "long", "gas_producers", 1, 0.95, "Direct gas sensitivity"),
@@ -369,6 +392,7 @@ BASE_WEATHER_MARKET_MAP = {
             _candidate("BP", "long", "lng_intl", 2, 0.62, "LNG and gas exposure"),
             _candidate("EQNR", "long", "lng_intl", 2, 0.65, "North Sea gas / LNG exporter"),
             _candidate("CARR", "long", "hvac_heating", 2, 0.65, "Heating system demand during cold events"),
+            _candidate("MTN", "long", "ski_resorts", 2, 0.72, "Vail Resorts — cold/snow conditions boost ski season bookings"),
             _candidate("NGG", "long", "utilities", 3, 0.30, "Less direct equity expression"),
         ],
         "short_candidates": [
@@ -385,6 +409,7 @@ BASE_WEATHER_MARKET_MAP = {
             "gas_producers",
             "lng_exporters",
             "agriculture",
+            "ski_resorts",
         ],
         "long_candidates": [
             _candidate("EQT", "long", "gas_producers", 1, 0.85, "Gas demand support"),
@@ -395,6 +420,7 @@ BASE_WEATHER_MARKET_MAP = {
             _candidate("ADM", "long", "grain_trading", 2, 0.55, "Crop damage support"),
             _candidate("BG", "long", "grain_trading", 2, 0.55, "Crop damage support"),
             _candidate("NTR", "long", "fertilizer", 2, 0.50, "Spring replant demand post-frost"),
+            _candidate("MTN", "long", "ski_resorts", 2, 0.68, "Frost / cold snap supports ski season conditions"),
         ],
         "short_candidates": [],
     },
@@ -439,10 +465,13 @@ BASE_WEATHER_MARKET_MAP = {
             "construction",
             "insurance",
             "utilities",
+            "hydropower",
         ],
         "long_candidates": [
             _candidate("AWK", "long", "water_infrastructure", 1, 0.90, "Water utility demand / infrastructure"),
             _candidate("XYL", "long", "water_engineering", 1, 0.88, "Flood management / water engineering"),
+            _candidate("BEP", "long", "hydropower", 1, 0.85, "Brookfield Renewable — heavy rain boosts hydro generation capacity"),
+            _candidate("AES", "long", "hydropower", 2, 0.78, "AES Corp — significant hydro portfolio benefits from AR precipitation"),
             _candidate("HD", "long", "home_repair", 2, 0.70, "Repair demand"),
             _candidate("LOW", "long", "home_repair", 2, 0.70, "Repair demand"),
             _candidate("CAT", "long", "infrastructure_repair", 2, 0.72, "Flood cleanup / infrastructure repair"),

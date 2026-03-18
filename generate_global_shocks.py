@@ -186,6 +186,55 @@ REGIONS = [
         "lon_max": 25.0,
         "commodities": ["Wheat", "Olive Oil"],
     },
+    # --- Additional new regions ---
+    {
+        "name": "Ukraine Eastern Europe",
+        "lat_min": 44.0,
+        "lat_max": 54.0,
+        "lon_min": 22.0,
+        "lon_max": 40.0,
+        "commodities": ["Wheat", "Sunflower Oil"],
+    },
+    {
+        "name": "Nordic Scandinavia",
+        "lat_min": 55.0,
+        "lat_max": 72.0,
+        "lon_min": 4.0,
+        "lon_max": 30.0,
+        "commodities": ["Natural Gas", "Hydropower"],
+    },
+    {
+        "name": "Andes South America",
+        "lat_min": -35.0,
+        "lat_max": -15.0,
+        "lon_min": -76.0,
+        "lon_max": -65.0,
+        "commodities": ["Copper", "Lithium"],
+    },
+    {
+        "name": "New Zealand",
+        "lat_min": -47.0,
+        "lat_max": -34.0,
+        "lon_min": 165.0,
+        "lon_max": 178.0,
+        "commodities": ["Dairy", "Natural Gas"],
+    },
+    {
+        "name": "US Great Plains",
+        "lat_min": 36.0,
+        "lat_max": 48.0,
+        "lon_min": -104.0,
+        "lon_max": -96.0,
+        "commodities": ["Wheat", "Cattle"],
+    },
+    {
+        "name": "Central America",
+        "lat_min": 8.0,
+        "lat_max": 18.0,
+        "lon_min": -92.0,
+        "lon_max": -75.0,
+        "commodities": ["Coffee", "Sugar"],
+    },
 ]
 
 MARKET_SENSITIVITY = {
@@ -205,6 +254,13 @@ MARKET_SENSITIVITY = {
     "Canola": 4,
     "LNG": 5,
     "Olive Oil": 3,
+    # Additional new commodities
+    "Sunflower Oil": 4,
+    "Hydropower": 4,
+    "Copper": 5,
+    "Lithium": 5,
+    "Dairy": 3,
+    "Cattle": 3,
 }
 
 RULES = {
@@ -212,33 +268,38 @@ RULES = {
         "temp_c_max": 35.0,
         "severity_step_c": 2.0,
         "base_score": 3,
-        "bullish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar", "Natural Gas", "Power Utilities"},
+        "bullish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar", "Natural Gas", "Power Utilities",
+                        "Sunflower Oil", "Copper", "Dairy", "Cattle"},
     },
     "extreme_heat": {
         "temp_c_max": 40.0,
         "severity_step_c": 2.0,
         "base_score": 4,
-        "bullish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar", "Natural Gas", "Power Utilities"},
+        "bullish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar", "Natural Gas", "Power Utilities",
+                        "Sunflower Oil", "Copper", "Dairy", "Cattle"},
     },
     "frost": {
         "temp_c_min": 0.0,
         "severity_step_c": 2.0,
         "base_score": 4,
-        "bullish_for": {"Coffee", "Sugar", "Wheat", "Natural Gas", "Power Utilities"},
+        "bullish_for": {"Coffee", "Sugar", "Wheat", "Natural Gas", "Power Utilities",
+                        "Sunflower Oil", "Dairy"},
     },
     "heavy_rain": {
         "precip_mm_7d": 100.0,
         "severity_step_mm": 25.0,
         "base_score": 3,
-        "bullish_for": {"Natural Gas", "Power Utilities"},
-        "bearish_for": {"Wheat", "Corn", "Soybeans", "Coffee", "Sugar"},
+        "bullish_for": {"Natural Gas", "Power Utilities", "Hydropower"},
+        "bearish_for": {"Wheat", "Corn", "Soybeans", "Coffee", "Sugar", "Sunflower Oil"},
     },
     "drought": {
         "precip_mm_7d_max": 10.0,
         "temp_c_mean_min": 28.0,
         "severity_step_mm": 5.0,
         "base_score": 4,
-        "bullish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar"},
+        "bullish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar",
+                        "Sunflower Oil", "Copper", "Lithium", "Dairy", "Cattle"},
+        "bearish_for": {"Hydropower"},
     },
     "storm_wind": {
         "wind_ms_max": 18.0,
@@ -250,8 +311,8 @@ RULES = {
         "precip_mm_7d": 140.0,
         "severity_step_mm": 30.0,
         "base_score": 4,
-        "bullish_for": {"Power Utilities", "Oil", "Natural Gas"},
-        "bearish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar"},
+        "bullish_for": {"Power Utilities", "Oil", "Natural Gas", "Hydropower"},
+        "bearish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar", "Sunflower Oil"},
     },
     "wildfire_risk": {
         "temp_c_max": 36.0,
@@ -265,7 +326,7 @@ RULES = {
         "temp_c_min": -5.0,
         "severity_step_c": 3.0,
         "base_score": 4,
-        "bullish_for": {"Natural Gas", "Power Utilities", "Wheat"},
+        "bullish_for": {"Natural Gas", "Power Utilities", "Wheat", "Dairy"},
     },
     "hurricane_risk": {
         "wind_ms_max": 25.0,
@@ -390,6 +451,37 @@ ASSET_MAP = {
         "best_vehicle": "DBA",
         "proxy_equities": ["ADM", "GIS"],
         "secondary_exposures": ["food manufacturers", "Mediterranean agriculture", "specialty foods"],
+    },
+    # Additional new commodity asset mappings
+    "Sunflower Oil": {
+        "best_vehicle": "DBA",
+        "proxy_equities": ["ADM", "BG", "NTR"],
+        "secondary_exposures": ["oilseed processors", "vegetable oil", "Eastern European agribusiness"],
+    },
+    "Hydropower": {
+        "best_vehicle": "XLU",
+        "proxy_equities": ["BEP", "AES", "NEE"],
+        "secondary_exposures": ["renewable energy utilities", "power grid operators", "water management"],
+    },
+    "Copper": {
+        "best_vehicle": "COPX",
+        "proxy_equities": ["FCX", "SCCO", "BHP", "RIO"],
+        "secondary_exposures": ["copper mining", "EV supply chain", "construction materials"],
+    },
+    "Lithium": {
+        "best_vehicle": "LIT",
+        "proxy_equities": ["ALB", "SQM", "LTHM"],
+        "secondary_exposures": ["EV battery supply chain", "energy storage", "chemicals"],
+    },
+    "Dairy": {
+        "best_vehicle": "DBA",
+        "proxy_equities": ["SMFG", "TSN", "PPC"],
+        "secondary_exposures": ["dairy processors", "food manufacturers", "agricultural inputs"],
+    },
+    "Cattle": {
+        "best_vehicle": "COW",
+        "proxy_equities": ["TSN", "PPC", "WH"],
+        "secondary_exposures": ["meatpacking", "food manufacturers", "feedlots"],
     },
 }
 

@@ -150,12 +150,15 @@ def normalize_anomaly_key(value: str) -> str:
 
 def commodity_context_type(row) -> str:
     commodity = normalize_text(row.get("commodity"), "")
-    if commodity in {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar", "Rice", "Cocoa", "Palm Oil", "Canola", "Olive Oil"}:
+    if commodity in {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar", "Rice", "Cocoa", "Palm Oil",
+                     "Canola", "Olive Oil", "Sunflower Oil", "Dairy", "Cattle"}:
         return "ag"
     if commodity in {"Natural Gas", "Oil", "Coal", "LNG"}:
         return "energy"
-    if commodity in {"Power Utilities"}:
+    if commodity in {"Power Utilities", "Hydropower"}:
         return "utilities"
+    if commodity in {"Copper", "Lithium"}:
+        return "metals"
     return "other"
 
 
@@ -178,11 +181,14 @@ def infer_trade(row) -> str:
     ctype = commodity_context_type(row)
     commodity = normalize_text(row.get("commodity"), "")
 
-    if anomaly in {"heatwave", "extreme_heat", "drought"} and ctype in {"ag", "energy", "utilities"}:
+    if anomaly in {"heatwave", "extreme_heat", "drought"} and ctype in {"ag", "energy", "utilities", "metals"}:
         return "Long"
 
+    if anomaly in {"drought"} and commodity == "Hydropower":
+        return "Short"  # Drought = less water = less hydro generation
+
     if anomaly in {"cold_wave", "frost", "polar_vortex", "ice_storm"} and commodity in {
-        "Natural Gas", "Power Utilities", "Wheat", "LNG", "Coal"
+        "Natural Gas", "Power Utilities", "Wheat", "LNG", "Coal", "Dairy"
     }:
         return "Long"
 
@@ -191,6 +197,9 @@ def infer_trade(row) -> str:
 
     if anomaly in {"heavy_rain", "flood_risk", "flood", "atmospheric_river"} and ctype in {"energy", "utilities"}:
         return "Long"
+
+    if anomaly in {"heavy_rain", "atmospheric_river"} and commodity == "Hydropower":
+        return "Long"  # More rainfall = more hydro generation
 
     if anomaly in {"storm_wind", "hurricane_risk", "hurricane", "wildfire_risk", "wildfire", "extreme_wind"} and ctype in {"energy", "utilities"}:
         return "Long"
@@ -286,6 +295,13 @@ def get_vehicle(row) -> str:
         "Canola": "MOO",
         "LNG": "UNG",
         "Olive Oil": "DBA",
+        # New commodities
+        "Sunflower Oil": "DBA",
+        "Hydropower": "XLU",
+        "Copper": "COPX",
+        "Lithium": "LIT",
+        "Dairy": "DBA",
+        "Cattle": "COW",
     }
     return fallback.get(commodity, commodity if commodity else "-")
 
@@ -471,6 +487,75 @@ SEASONAL_BASELINE = {
         "heatwave":  {"peak": [12, 1, 2], "fringe": [11, 3]},
         "drought":   {"peak": [1, 2, 3], "fringe": [12, 4]},
     },
+    "Australia East": {
+        "heatwave":  {"peak": [12, 1, 2], "fringe": [11, 3]},
+        "drought":   {"peak": [1, 2, 3], "fringe": [12, 4]},
+    },
+    # New regions
+    "Ukraine Eastern Europe": {
+        "drought":    {"peak": [6, 7, 8], "fringe": [5, 9]},
+        "heatwave":   {"peak": [6, 7, 8], "fringe": [5, 9]},
+        "frost":      {"peak": [11, 12, 1, 2], "fringe": [3, 10]},
+        "cold_wave":  {"peak": [12, 1, 2], "fringe": [11, 3]},
+    },
+    "Nordic Scandinavia": {
+        "cold_wave":    {"peak": [12, 1, 2], "fringe": [11, 3]},
+        "polar_vortex": {"peak": [1, 2], "fringe": [12, 3]},
+        "storm_wind":   {"peak": [11, 12, 1, 2], "fringe": [3, 10]},
+        "extreme_wind": {"peak": [11, 12, 1, 2], "fringe": [3, 10]},
+    },
+    "Andes South America": {
+        "drought": {"peak": [12, 1, 2, 3], "fringe": [11, 4]},
+        "frost":   {"peak": [6, 7, 8], "fringe": [5, 9]},
+    },
+    "New Zealand": {
+        "drought":    {"peak": [1, 2, 3], "fringe": [12, 4]},
+        "heatwave":   {"peak": [12, 1, 2], "fringe": [11, 3]},
+        "storm_wind": {"peak": [6, 7, 8], "fringe": [5, 9]},
+    },
+    "US Great Plains": {
+        "heatwave":  {"peak": [6, 7, 8], "fringe": [5, 9]},
+        "drought":   {"peak": [6, 7, 8, 9], "fringe": [5, 10]},
+        "cold_wave": {"peak": [12, 1, 2], "fringe": [11, 3]},
+        "frost":     {"peak": [10, 11, 3, 4], "fringe": [9, 5]},
+    },
+    "Central America": {
+        "drought":         {"peak": [2, 3, 4], "fringe": [1, 5]},
+        "heavy_rain":      {"peak": [5, 6, 7, 8, 9, 10], "fringe": [4, 11]},
+        "monsoon_failure": {"peak": [5, 6, 7, 8, 9], "fringe": [4, 10]},
+    },
+    "East Africa": {
+        "drought": {"peak": [1, 2, 3], "fringe": [12, 4]},
+        "heavy_rain": {"peak": [3, 4, 5, 10, 11], "fringe": [2, 6, 9, 12]},
+    },
+    "China Yangtze Basin": {
+        "drought":    {"peak": [6, 7, 8], "fringe": [5, 9]},
+        "heavy_rain": {"peak": [6, 7, 8], "fringe": [5, 9]},
+        "flood_risk": {"peak": [6, 7, 8], "fringe": [5, 9]},
+        "cold_wave":  {"peak": [12, 1, 2], "fringe": [11, 3]},
+    },
+    "Middle East Gulf": {
+        "heatwave":      {"peak": [6, 7, 8], "fringe": [5, 9]},
+        "extreme_heat":  {"peak": [7, 8], "fringe": [6, 9]},
+        "drought":       {"peak": [5, 6, 7, 8, 9], "fringe": [4, 10]},
+        "storm_wind":    {"peak": [5, 6], "fringe": [4, 7]},
+    },
+    "Southern Europe": {
+        "drought":   {"peak": [6, 7, 8], "fringe": [5, 9]},
+        "heatwave":  {"peak": [7, 8], "fringe": [6, 9]},
+        "wildfire_risk": {"peak": [7, 8, 9], "fringe": [6, 10]},
+    },
+    "Mato Grosso": {
+        "drought":    {"peak": [7, 8, 9], "fringe": [6, 10]},
+        "heatwave":   {"peak": [9, 10, 11], "fringe": [8, 12]},
+        "heavy_rain": {"peak": [11, 12, 1, 2, 3], "fringe": [4, 10]},
+    },
+    "Canadian Prairies": {
+        "drought":   {"peak": [6, 7, 8], "fringe": [5, 9]},
+        "heatwave":  {"peak": [7, 8], "fringe": [6, 9]},
+        "frost":     {"peak": [9, 10, 11], "fringe": [8, 12]},
+        "cold_wave": {"peak": [12, 1, 2], "fringe": [11, 3]},
+    },
 }
 
 
@@ -508,6 +593,19 @@ def compute_trend_factor(row) -> float:
         "recovering": 2.0,
     }
     return mapping.get(trend, 5.0)
+
+
+def compute_edge_score(row) -> float:
+    """Score 0-10: inverse of media validation.
+    Unvalidated signal = maximum alpha (market hasn't priced it yet).
+    Validated = media has picked it up = alpha window closing.
+    This is the core 'weather edge' thesis: ECMWF sees it 7-10 days before media."""
+    media_val = row.get("media_validated")
+    if media_val is True:
+        return 3.0    # Media has already picked it up — reduced alpha window
+    if media_val is False:
+        return 9.5    # Explicitly NOT in media yet — maximum alpha window
+    return 7.0        # Unknown / not yet checked — assume moderate edge
 
 
 def compute_weather_strength(row) -> float:
@@ -605,14 +703,18 @@ def compute_final_trade_score(
     seasonality_score: float = 5.0,
     trend_factor: float = 5.0,
     confluence_bonus: float = 0.0,
+    edge_score: float = 7.0,
 ) -> float:
+    # Weights: weather_strength 0.30 (was 0.35), conflict_cleanliness 0.10 (was 0.15),
+    # edge_score 0.10 (new) — total still 1.00 before confluence bonus
     score = (
-        0.35 * weather_strength +
+        0.30 * weather_strength +
         0.20 * mapping_quality +
-        0.15 * conflict_cleanliness +
+        0.10 * conflict_cleanliness +
         0.10 * execution_quality +
         0.10 * seasonality_score +
-        0.10 * trend_factor
+        0.10 * trend_factor +
+        0.10 * edge_score
     ) + confluence_bonus
     return round(clamp(score), 2)
 
@@ -629,6 +731,7 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
         weather_strength = compute_weather_strength(row)
         seasonality_score = compute_seasonality_score(row)
         trend_factor = compute_trend_factor(row)
+        edge_score = compute_edge_score(row)
 
         for symbol in symbols:
             mapping_quality = compute_mapping_quality(row, symbol, trade)
@@ -647,6 +750,7 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
                     "Execution Quality": execution_quality,
                     "Seasonality": seasonality_score,
                     "Trend Factor": trend_factor,
+                    "Edge Score": edge_score,
                     "Trend Direction": normalize_text(row.get("trend_direction", ""), "new"),
                     "Anomaly Type": normalize_anomaly_key(row.get("anomaly_type", "")),
                     "Why": get_why_it_matters(row),
@@ -710,6 +814,7 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
         weather_strength = float(winner["Weather Strength"])
         seasonality_score = float(winner["Seasonality"])
         trend_factor = float(winner["Trend Factor"])
+        edge_score = float(winner.get("Edge Score", 7.0))
         why = winner["Why"]
 
         # Confluence bonus: check how many regions have the same anomaly
@@ -725,6 +830,7 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
             seasonality_score=seasonality_score,
             trend_factor=trend_factor,
             confluence_bonus=conf_bonus,
+            edge_score=edge_score,
         )
 
         conviction = "MIXED" if final_trade == "No Trade" else score_bucket(int(round(final_trade_score)))
@@ -750,6 +856,7 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
                 "Execution Quality": round(execution_quality, 2),
                 "Seasonality": round(seasonality_score, 2),
                 "Trend Factor": round(trend_factor, 2),
+                "Edge Score": round(edge_score, 2),
                 "Confluence Bonus": round(conf_bonus, 2),
                 "Long Raw": long_score,
                 "Short Raw": short_score,
@@ -776,6 +883,7 @@ def build_ranked_trade_table(df: pd.DataFrame) -> pd.DataFrame:
         weather_strength = compute_weather_strength(row)
         seasonality_score = compute_seasonality_score(row)
         trend_factor = compute_trend_factor(row)
+        edge_score = compute_edge_score(row)
         anomaly_type = normalize_anomaly_key(row.get("anomaly_type", ""))
         conf_bonus = compute_confluence_bonus(df, anomaly_type)
         trend_dir = normalize_text(row.get("trend_direction", ""), "new")
@@ -801,6 +909,7 @@ def build_ranked_trade_table(df: pd.DataFrame) -> pd.DataFrame:
                     "Execution Quality": 0.0,
                     "Seasonality": round(seasonality_score, 2),
                     "Trend Factor": round(trend_factor, 2),
+                    "Edge Score": round(edge_score, 2),
                     "Final Trade Score": weather_strength,
                 }
             )
@@ -817,6 +926,7 @@ def build_ranked_trade_table(df: pd.DataFrame) -> pd.DataFrame:
             seasonality_score=seasonality_score,
             trend_factor=trend_factor,
             confluence_bonus=conf_bonus,
+            edge_score=edge_score,
         )
 
         rows.append(
@@ -839,6 +949,7 @@ def build_ranked_trade_table(df: pd.DataFrame) -> pd.DataFrame:
                 "Execution Quality": round(execution_quality, 2),
                 "Seasonality": round(seasonality_score, 2),
                 "Trend Factor": round(trend_factor, 2),
+                "Edge Score": round(edge_score, 2),
                 "Final Trade Score": round(final_trade_score, 2),
             }
         )
@@ -862,6 +973,7 @@ def show_trade_card(row, rank_number=None):
     execution_quality = compute_execution_quality(row, best_symbol) if best_symbol else 0.0
     seasonality_score = compute_seasonality_score(row)
     trend_factor      = compute_trend_factor(row)
+    edge_score        = compute_edge_score(row)
     trend_dir         = normalize_text(row.get("trend_direction", ""), "new")
     media_val         = row.get("media_validated")
 
@@ -872,6 +984,7 @@ def show_trade_card(row, rank_number=None):
         execution_quality=execution_quality,
         seasonality_score=seasonality_score,
         trend_factor=trend_factor,
+        edge_score=edge_score,
     )
     bucket = score_bucket(int(round(final_score)))
 
@@ -936,6 +1049,7 @@ def show_trade_card(row, rank_number=None):
             progress_bar_html("Execution Quality", execution_quality) +
             progress_bar_html("Seasonality",       seasonality_score) +
             progress_bar_html("Trend Factor",      trend_factor) +
+            progress_bar_html("Edge Score",        edge_score) +
             progress_bar_html("Final Score",       final_score)
         )
         d2.markdown(score_html, unsafe_allow_html=True)
