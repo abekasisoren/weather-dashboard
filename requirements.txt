@@ -5,3 +5,5 @@ xarray
 cfgrib
 ecmwf-opendata
 psycopg[binary]
+scikit-learn
+xgboost

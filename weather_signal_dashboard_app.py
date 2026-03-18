@@ -1390,3 +1390,81 @@ with tab_aftermath:
                 aftermath_df[[c for c in why_cols if c in aftermath_df.columns]],
                 use_container_width=True,
             )
+
+        # ── ML Scorer ─────────────────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("🤖 ML Trade Scorer")
+        st.caption(
+            "Trains an XGBoost model on your logged trade outcomes to learn which "
+            "weather/region/anomaly combinations actually win. Improves as your "
+            "track record grows."
+        )
+
+        try:
+            from ml_scorer import (
+                get_labeled_data, train_model, load_model,
+                predict_win_prob, model_info, MIN_SAMPLES,
+            )
+
+            labeled_df = get_labeled_data(aftermath_df)
+            n_labeled = len(labeled_df)
+            info = model_info()
+
+            ml_c1, ml_c2, ml_c3, ml_c4 = st.columns(4)
+            ml_c1.metric("Labeled Trades", n_labeled)
+            ml_c2.metric("Needed to Train", MIN_SAMPLES)
+            ml_c3.metric("Model", "✅ Ready" if info["trained"] else "⏳ Not trained")
+            if info["trained"]:
+                ml_c4.metric("Trained on", f"{info['n_trained']} trades")
+
+            if n_labeled < MIN_SAMPLES:
+                st.info(
+                    f"Need **{MIN_SAMPLES - n_labeled} more** labeled trade outcomes. "
+                    "Once Finnhub is connected, fetch quotes daily — P&L data "
+                    "accumulates automatically."
+                )
+            else:
+                if st.button("🔄 Train / Retrain ML Model", type="primary"):
+                    with st.spinner("Training model on your trade history…"):
+                        results = train_model(aftermath_df)
+                    if "error" in results:
+                        st.error(results["error"])
+                    else:
+                        st.success(
+                            f"**{results['model_name']}** trained on "
+                            f"{results['n_samples']} trades — "
+                            f"CV Accuracy: **{results['accuracy']:.1%}** "
+                            f"(±{results['accuracy_std']:.1%})  |  "
+                            f"Wins: {results['wins']}  Losses: {results['losses']}"
+                        )
+                        # Feature importance bar chart
+                        feat_df = pd.DataFrame(
+                            results["top_features"], columns=["Feature", "Importance"]
+                        ).set_index("Feature")
+                        st.markdown("**Feature Importance**")
+                        st.bar_chart(feat_df)
+
+            # Show ML win-probability on current signals if model is ready
+            if info["trained"]:
+                st.markdown("**ML Win Probability — Current Signals**")
+                ml_pulse = build_global_pulse_trader_table(filtered.copy())
+                if not ml_pulse.empty:
+                    # Map column names to what ml_scorer expects
+                    ml_input = ml_pulse.rename(columns={
+                        "Final Trade Score": "Score",
+                        "Anomaly Type": "Anomaly",
+                    })
+                    probs = predict_win_prob(ml_input)
+                    if probs is not None:
+                        ml_pulse["ML Win Prob"] = (probs * 100).round(1).astype(str) + "%"
+                        display_ml = ml_pulse[
+                            [c for c in ["Stock Trade", "Trade", "Conviction",
+                                         "Final Trade Score", "ML Win Prob",
+                                         "Region", "Anomaly"] if c in ml_pulse.columns]
+                        ].sort_values("ML Win Prob", ascending=False)
+                        st.dataframe(display_ml, use_container_width=True)
+                    else:
+                        st.info("Could not generate predictions — retrain the model.")
+
+        except Exception as ml_err:
+            st.warning(f"ML Scorer unavailable: {ml_err}")
