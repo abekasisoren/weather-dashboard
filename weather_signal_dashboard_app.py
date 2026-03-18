@@ -889,9 +889,7 @@ def show_trade_card(row, rank_number=None):
     trend_label = trend_map.get(trend_dir, trend_dir.title())
 
     region  = normalize_text(row.get("region", ""), "—").replace("_", " ").title()
-    anomaly = normalize_anomaly_display(
-        normalize_text(row.get("anomaly_type", ""), "—")
-    )
+    anomaly = normalize_text(row.get("anomaly_type", ""), "—").replace("_", " ").title()
     commodity = normalize_text(row.get("commodity", ""), "—").replace("_", " ").title()
     why       = get_why_it_matters(row)
     why_short = (why[:130] + "…") if len(why) > 130 else why
