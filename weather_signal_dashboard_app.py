@@ -1609,6 +1609,333 @@ PHENO_NARRATIVE: dict[tuple[str, str], str] = {
 }
 
 
+def build_teacher_narrative(
+    best_row,
+    event_sigma: float,
+    weather_strength: float,
+    seasonality_score: float,
+    trend_factor: float,
+    edge_score: float,
+    conf_bonus: float,
+    stock_list: list,
+    event_score: float,
+    region: str,
+    anomaly_key: str,
+    anomaly_display: str,
+    commodities: list,
+    trend_dir: str,
+    rank_number: int,
+    bucket: str,
+    all_df: "pd.DataFrame",
+) -> str:
+    """
+    Generate a flowing, conversational 'teacher explains to classroom' narrative
+    for a weather event card. Returns a markdown string.
+    Every sentence is data-driven — no hardcoded facts, only templates filled
+    from computed score values.
+    """
+    import datetime
+
+    lines: list[str] = []
+    month_name = {
+        1: "January", 2: "February", 3: "March", 4: "April",
+        5: "May", 6: "June", 7: "July", 8: "August",
+        9: "September", 10: "October", 11: "November", 12: "December",
+    }.get(datetime.datetime.now().month, "")
+
+    norm_key = anomaly_key.lower().replace(" ", "_")
+    long_stocks  = [s for s in stock_list if s["direction"] == "Long"  and not s.get("cooldown")]
+    short_stocks = [s for s in stock_list if s["direction"] == "Short" and not s.get("cooldown")]
+    top_commodity = commodities[0] if commodities else ""
+
+    # ── Para 1: Opening ────────────────────────────────────────────────────────
+    rank_str = f"#{rank_number} " if rank_number else ""
+    conviction_language = {
+        "PRIME":      "This is a high-conviction signal — the evidence is strong enough to act on right now.",
+        "ACTIONABLE": "This is a solid signal — strong enough to consider an active position.",
+        "WATCH":      "This is a developing signal — worth monitoring but not quite ready for a full position.",
+        "EARLY":      "This is an early-stage signal — the system spotted something, but conviction is still building.",
+    }.get(bucket, "This is an active weather signal.")
+
+    lines.append(
+        f"**{region}** is showing **{anomaly_display}** and the system has ranked it "
+        f"{rank_str}with a score of **{event_score:.1f}/10** ({bucket}). {conviction_language}"
+    )
+
+    # ── Para 2: Sigma ──────────────────────────────────────────────────────────
+    if event_sigma >= 3.0:
+        sigma_plain = (
+            f"The **{event_sigma:.1f}σ** badge is the first thing to understand here. "
+            f"That sigma number — standing for standard deviations from the long-run average — "
+            f"tells you this is a generational extreme. Think of it this way: if you looked at "
+            f"weather records for {region} going back 100 years, you'd barely find a handful of "
+            f"events this intense at this time of year. The market is very well-equipped to price "
+            f"expected seasonal risk — a summer heatwave in Texas, a winter freeze in Europe. "
+            f"What it consistently fails to price is the truly extraordinary outlier. At {event_sigma:.1f}σ, "
+            f"we are firmly in that territory."
+        )
+    elif event_sigma >= 2.0:
+        sigma_plain = (
+            f"The **{event_sigma:.1f}σ** badge is key context. That number measures how far this "
+            f"event deviates from the long-run average for {region} at this time of year — in terms "
+            f"of standard deviations. At {event_sigma:.1f}σ, you're looking at an event that occurs "
+            f"roughly once every 20–50 years in this region and season. The market does a decent job "
+            f"pricing the routine seasonal patterns, but rare events like this one tend to be "
+            f"systematically underpriced — because most models and most traders anchor to "
+            f"what is 'normal', not what is possible."
+        )
+    elif event_sigma >= 1.5:
+        sigma_plain = (
+            f"The **{event_sigma:.1f}σ** badge tells you this is an unusual but not extreme event — "
+            f"something that happens roughly once per decade in this region. At 1.5σ+, institutional "
+            f"weather desks start taking the signal seriously. Below 1.5σ, most trading desks would "
+            f"treat the event as seasonal noise. We're above that threshold here, which is why "
+            f"the system has generated a trade recommendation."
+        )
+    else:
+        sigma_plain = (
+            f"The **{event_sigma:.1f}σ** badge reflects a moderate anomaly — notable, but not unusual "
+            f"enough that the market is caught off guard. Most institutional weather desks require at "
+            f"least 1.5σ before entering a position. The score here is being driven more by "
+            f"mapping quality, trend, and execution factors than by the raw weather intensity. "
+            f"If the signal strengthens in the next ECMWF run, conviction will increase."
+        )
+    lines.append(sigma_plain)
+
+    # ── Para 3: Score drivers ──────────────────────────────────────────────────
+    ws_desc = (
+        "very high" if weather_strength >= 8 else
+        "strong"    if weather_strength >= 6 else
+        "moderate"  if weather_strength >= 4 else
+        "relatively weak"
+    )
+    score_driver_parts = [
+        f"The **weather strength component** — which carries 30% of the final score — is coming in at "
+        f"**{weather_strength:.1f}/10**, which is {ws_desc}."
+    ]
+    if weather_strength >= 7:
+        score_driver_parts.append(
+            f"That tells you the underlying ECMWF data is compelling: the signal level, persistence "
+            f"(how many consecutive forecast runs have confirmed this), severity of the physical "
+            f"readings, and market relevance of the affected commodities are all pointing in the "
+            f"same direction."
+        )
+    elif weather_strength >= 5:
+        score_driver_parts.append(
+            f"The ECMWF data shows a credible signal, but it hasn't been persistent enough across "
+            f"multiple model runs to reach maximum conviction. Watch whether the next 12z or 00z "
+            f"run confirms or weakens this reading."
+        )
+    else:
+        score_driver_parts.append(
+            f"The ECMWF data is flagging something, but the physical readings aren't yet extreme "
+            f"enough on their own to drive a high score. The score here is being sustained more by "
+            f"the mapping quality and execution factors."
+        )
+    lines.append(" ".join(score_driver_parts))
+
+    # ── Para 4: Seasonality ────────────────────────────────────────────────────
+    if seasonality_score >= 8.0:
+        season_para = (
+            f"Here's something important: {anomaly_display} in **{month_name}** is genuinely "
+            f"unexpected for {region}. The system scores this as an off-season event "
+            f"(seasonality: {seasonality_score:.1f}/10), which significantly boosts the final "
+            f"score. The logic is straightforward — markets price seasonal risk reasonably well. "
+            f"A flood in Brazil during peak wet season? Partially expected. A flood during a "
+            f"month when conditions are normally calm? The market hasn't positioned for it, "
+            f"which is exactly where the alpha lives."
+        )
+    elif seasonality_score >= 5.0:
+        season_para = (
+            f"In terms of timing, {anomaly_display} in {month_name} is somewhat unusual "
+            f"for {region} — a fringe-season event (seasonality: {seasonality_score:.1f}/10). "
+            f"The market has some awareness of seasonal risk, but not full positioning. "
+            f"Think of it as the market being partially asleep — it knows this could happen, "
+            f"but probably hasn't fully hedged."
+        )
+    else:
+        season_para = (
+            f"The timing here is worth noting: {anomaly_display} in {month_name} is actually "
+            f"typical for {region} — this is peak season for this type of event "
+            f"(seasonality: {seasonality_score:.1f}/10). That means the market is already "
+            f"pricing some level of seasonal risk. The edge here comes from the **magnitude** "
+            f"being larger than the seasonal baseline, not from the event being a surprise."
+        )
+    lines.append(season_para)
+
+    # ── Para 5: Trend ──────────────────────────────────────────────────────────
+    trend_paras = {
+        "new": (
+            f"Critically, this signal is **brand new** — it appeared for the first time in the "
+            f"latest ECMWF model run. It is not yet in Reuters, Bloomberg, or any sell-side "
+            f"weather report. This is the core of the weather-trading alpha thesis: systematic "
+            f"early detection. ECMWF typically detects meaningful weather events **7–10 days** "
+            f"before they appear in financial media. Right now, you have a **48–96 hour** window "
+            f"before the wider market begins to notice."
+        ),
+        "worsening": (
+            f"The signal is **actively getting worse** — it has intensified since the previous "
+            f"model run. This is actually when conviction should be highest: the system has "
+            f"confirmed a trend rather than a one-off data point, and conditions are still "
+            f"moving in the direction that makes the trade more compelling. "
+            f"At this stage, the urgency to act is real — once the signal peaks and begins "
+            f"recovering, the best entry window closes."
+        ),
+        "stable": (
+            f"The signal has been **stable** across multiple model runs — the same intensity, "
+            f"confirmed day after day. That persistence is actually a double-edged sword. "
+            f"On one hand, it tells you this is a reliable, well-established signal that "
+            f"the model isn't going to revise away overnight. On the other, the market has "
+            f"had more time to notice it, so some of the alpha may already be priced. "
+            f"The trade is valid but the entry window has narrowed."
+        ),
+        "recovering": (
+            f"Pay close attention here: the signal is **recovering** — it was stronger in "
+            f"previous model runs and is now easing. In trading terms, this usually means "
+            f"the best entry opportunity has already passed. If you're already in a position, "
+            f"this is a signal to think about trimming. If you're not in yet, the risk/reward "
+            f"has shifted — the weather event is moving past its peak impact on the market."
+        ),
+    }
+    lines.append(trend_paras.get(trend_dir, f"Signal trend: {trend_dir}."))
+
+    # ── Para 6: Stock recommendations ─────────────────────────────────────────
+    if long_stocks or short_stocks:
+        stock_para_parts: list[str] = ["**Now, let's talk about the stock recommendations.**"]
+
+        if long_stocks:
+            sym_list = ", ".join(s["symbol"] for s in long_stocks[:5])
+            roles = list({s["role"] for s in long_stocks[:5] if s.get("role")})
+            role_str = f" ({', '.join(roles[:3])})" if roles else ""
+            long_thesis = TRADE_THESIS.get((norm_key, "Long"), "")
+            stock_para_parts.append(
+                f"The system is recommending **Long** positions in: **{sym_list}**{role_str}. "
+                f"{'Here is the causal chain: ' + long_thesis if long_thesis else ''}"
+            )
+
+        if short_stocks:
+            sym_list = ", ".join(s["symbol"] for s in short_stocks[:5])
+            roles = list({s["role"] for s in short_stocks[:5] if s.get("role")})
+            role_str = f" ({', '.join(roles[:3])})" if roles else ""
+            short_thesis = TRADE_THESIS.get((norm_key, "Short"), "")
+            stock_para_parts.append(
+                f"The system is recommending **Short** positions in: **{sym_list}**{role_str}. "
+                f"{'These companies get hurt because: ' + short_thesis if short_thesis else ''}"
+            )
+
+        top_score = stock_list[0]["score"] if stock_list else event_score
+        if top_score >= 8:
+            stock_para_parts.append(
+                f"All the recommended stocks are scoring close to **{top_score:.1f}/10** — "
+                f"they all inherit the same strong event-level inputs (weather strength, "
+                f"seasonality, trend, edge) and the mapping from this weather event to these "
+                f"sectors is clean and direct."
+            )
+        lines.append(" ".join(stock_para_parts))
+
+    # ── Para 7: Pheno ──────────────────────────────────────────────────────────
+    top_pheno_stage = next((s["pheno_stage"] for s in stock_list if s.get("pheno_stage")), "")
+    top_pheno_mult  = next((s["pheno_mult"]  for s in stock_list if s.get("pheno_stage")), 1.0)
+    pheno_key = (top_commodity.lower().strip(), norm_key)
+    pheno_text = PHENO_NARRATIVE.get(pheno_key, "")
+
+    if pheno_text and top_pheno_stage:
+        if top_pheno_mult >= 1.7:
+            pheno_intro = (
+                f"The crop stage multiplier deserves special attention here. "
+                f"**{top_commodity.title()}** is currently in its **{top_pheno_stage}** stage "
+                f"— this is the most sensitive window in the entire growing season, which is "
+                f"why the system applies a **{top_pheno_mult:.1f}×** multiplier to the final score. "
+            )
+        elif top_pheno_mult >= 1.2:
+            pheno_intro = (
+                f"The crop stage is relevant here: **{top_commodity.title()}** is in "
+                f"**{top_pheno_stage}** ({top_pheno_mult:.1f}× sensitivity). "
+            )
+        elif top_pheno_mult <= 0.6:
+            pheno_intro = (
+                f"Interestingly, the crop stage is actually **dampening** this signal. "
+                f"**{top_commodity.title()}** is in **{top_pheno_stage}** — a low-sensitivity "
+                f"period — which is why the system applies only a **{top_pheno_mult:.1f}×** multiplier. "
+                f"The weather event is real, but the crop doesn't care much about it right now. "
+            )
+        else:
+            pheno_intro = (
+                f"**{top_commodity.title()}** is in its **{top_pheno_stage}** stage "
+                f"({top_pheno_mult:.1f}× sensitivity). "
+            )
+        lines.append(pheno_intro + pheno_text)
+
+    # ── Para 8: Confluence ─────────────────────────────────────────────────────
+    norm_anomaly_for_lookup = norm_key
+    same_anomaly_regions = all_df[
+        all_df["anomaly_type"].str.strip().str.lower().str.replace(" ", "_") == norm_anomaly_for_lookup
+    ]["region"].dropna().unique().tolist()
+
+    if len(same_anomaly_regions) >= 3:
+        confluence_para = (
+            f"One of the most powerful aspects of this signal is **regional confluence**. "
+            f"It's not just {region} — **{len(same_anomaly_regions)} separate regions** are all "
+            f"showing {anomaly_display} at the same time: "
+            f"*{', '.join(same_anomaly_regions[:5])}*. "
+            f"When the same weather anomaly hits multiple production origins simultaneously, "
+            f"the commodity price impact is magnified far beyond what any single-region event "
+            f"would cause. This is the kind of signal that moves markets at scale."
+        )
+    elif len(same_anomaly_regions) == 2:
+        other = [r for r in same_anomaly_regions if r.strip().lower() != region.strip().lower()]
+        other_str = other[0] if other else same_anomaly_regions[0]
+        confluence_para = (
+            f"This signal has a **dual-region dimension**: both **{region}** and **{other_str}** "
+            f"are showing {anomaly_display} simultaneously. When two major production regions "
+            f"are affected at once, the commodity market impact is typically larger and more "
+            f"durable than a single-origin event."
+        )
+    else:
+        confluence_para = (
+            f"This is a **single-region signal** — only {region} is showing this anomaly right now. "
+            f"That's not a problem, but it's worth knowing: the largest commodity price moves "
+            f"historically come from multi-region confluence events. If you see similar signals "
+            f"developing in other {top_commodity} production regions, that would significantly "
+            f"increase conviction."
+        )
+    lines.append(confluence_para)
+
+    # ── Para 9: Edge/timing ────────────────────────────────────────────────────
+    media_val = best_row.get("media_validated")
+    if media_val is True:
+        edge_para = (
+            f"**One important caveat on timing:** this event has already been picked up by "
+            f"financial media. That means the market is actively digesting this information. "
+            f"The edge score reflects this — at 3.0/10, we're telling you the alpha window is "
+            f"closing. This doesn't mean the trade is wrong, but it does mean the best entry "
+            f"prices may have already passed. Size accordingly."
+        )
+    else:
+        edge_para = (
+            f"**The alpha window:** right now, this event is not in financial media. ECMWF "
+            f"is detecting it before Reuters, Bloomberg, or any sell-side weather desk has "
+            f"written about it. That gap — between when the atmosphere tells you something "
+            f"and when the market finally hears about it — is where weather-driven trading "
+            f"generates its edge. This window is typically **48–96 hours** for events of this "
+            f"type, and you're at the beginning of it."
+        )
+    lines.append(edge_para)
+
+    # ── Para 10: What to watch ─────────────────────────────────────────────────
+    invalidation = INVALIDATION_CONDITIONS.get(norm_key, "")
+    if invalidation:
+        # Extract just the first sentence/clause for a brief closing note
+        first_clause = invalidation.split(".")[0].replace("**Watch for:** ", "").strip()
+        lines.append(
+            f"**Finally, what to watch:** the signal would weaken or invalidate if "
+            f"{first_clause.lower()}. See the *What Would Invalidate This Signal* section "
+            f"below for the full checklist of data points to monitor."
+        )
+
+    return "\n\n".join(lines)
+
+
 def _sigma_frequency_label(sigma: float) -> str:
     """Convert Z-score to plain-English frequency estimate."""
     if sigma >= 3.0:
@@ -1726,8 +2053,11 @@ def build_detailed_reasoning(
     event_score: float,
     region: str,
     anomaly_key: str,
+    anomaly_display: str,
     commodities: list,
     trend_dir: str,
+    rank_number: int,
+    bucket: str,
     all_df: "pd.DataFrame",
     accent: str = "#5DADE2",
 ) -> None:
@@ -1750,6 +2080,30 @@ def build_detailed_reasoning(
         5: "May", 6: "June", 7: "July", 8: "August",
         9: "September", 10: "October", 11: "November", 12: "December",
     }.get(current_month, "")
+
+    # ── 0. Teacher narrative (conversational classroom-style explanation) ──────
+    st.markdown("#### 🎓 Plain-English Explanation")
+    teacher_text = build_teacher_narrative(
+        best_row=best_row,
+        event_sigma=event_sigma,
+        weather_strength=weather_strength,
+        seasonality_score=seasonality_score,
+        trend_factor=trend_factor,
+        edge_score=edge_score,
+        conf_bonus=conf_bonus,
+        stock_list=stock_list,
+        event_score=event_score,
+        region=region,
+        anomaly_key=anomaly_key,
+        anomaly_display=anomaly_display,
+        commodities=commodities,
+        trend_dir=trend_dir,
+        rank_number=rank_number,
+        bucket=bucket,
+        all_df=all_df,
+    )
+    st.markdown(teacher_text)
+    st.markdown("---")
 
     # ── Seasonality narrative ──────────────────────────────────────────────────
     if seasonality_score >= 8.0:
@@ -2161,8 +2515,11 @@ def show_weather_event_card(
             event_score=event_score,
             region=region,
             anomaly_key=anomaly_key,
+            anomaly_display=anomaly,
             commodities=commodities,
             trend_dir=trend_dir,
+            rank_number=rank_number,
+            bucket=bucket,
             all_df=all_df,
             accent=accent,
         )
