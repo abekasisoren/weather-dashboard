@@ -2463,40 +2463,41 @@ def show_weather_event_card(
             pheno_badge = ""
         stock_rows_html += (
             f'<div style="display:flex;align-items:center;gap:8px;padding:3px 0;'
-            f'border-bottom:1px solid rgba(255,255,255,0.04);">'
+            f'border-bottom:1px solid rgba(255,255,255,0.06);">'
             f'<span style="color:{d_color};font-size:10px;font-weight:900;width:12px;flex-shrink:0;">{d_arrow}</span>'
             f'<span style="font-family:monospace;font-size:12px;font-weight:700;color:{sym_color};width:48px;flex-shrink:0;">{s["symbol"]}</span>'
             f'<span style="font-size:11px;font-weight:700;color:{score_color};width:28px;flex-shrink:0;">{s["score"]:.1f}</span>'
-            f'<span style="font-size:10px;color:#555;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">{s["role"]}</span>'
+            f'<span style="font-size:10px;color:#777;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">{s["role"]}</span>'
             f'{pheno_badge}{cd_badge}'
             f'</div>'
         )
 
     card_html = (
+        # Explicit dark background so text colours are always correct regardless of Streamlit theme
         f'<div style="border-left:3px solid {accent};border-radius:6px;'
-        f'background:rgba(255,255,255,0.03);padding:16px 18px 14px 18px;'
+        f'background:#16181D;padding:16px 18px 14px 18px;'
         f'margin-bottom:2px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
 
         f'<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">'
-        f'<span style="font-size:10px;font-weight:700;color:#666;letter-spacing:1px;text-transform:uppercase;">'
+        f'<span style="font-size:10px;font-weight:700;color:#777;letter-spacing:1px;text-transform:uppercase;">'
         f'{rank_str}&nbsp;&nbsp;{bucket}{media_str}</span>'
         f'<div style="text-align:right;line-height:1;">'
-        f'<span style="font-size:26px;font-weight:700;color:white;">{event_score:.1f}</span>'
+        f'<span style="font-size:26px;font-weight:700;color:{accent};">{event_score:.1f}</span>'
         f'<span style="font-size:11px;color:#555;">&thinsp;/10</span>'
         f'{sigma_badge}'
         f'</div></div>'
 
-        f'<div style="font-size:17px;font-weight:700;color:#f0f0f0;margin-bottom:2px;">{region}</div>'
+        f'<div style="font-size:17px;font-weight:700;color:#E8E8E8;margin-bottom:2px;">{region}</div>'
         f'<div style="font-size:13px;font-weight:700;color:{accent};letter-spacing:0.3px;margin-bottom:4px;">{anomaly}</div>'
         f'<div style="font-size:11px;color:#666;margin-bottom:10px;">'
         f'<span style="color:#888;">{trend_label}</span>&nbsp;&nbsp;·&nbsp;&nbsp;{commodities_str}</div>'
 
         f'<div style="font-size:12px;color:#888;line-height:1.7;margin-bottom:12px;">{why}</div>'
 
-        f'<div style="background:#1a1a1a;border-radius:3px;height:2px;margin-bottom:12px;">'
+        f'<div style="background:#2a2a2a;border-radius:3px;height:2px;margin-bottom:12px;">'
         f'<div style="background:{accent};width:{score_pct}%;height:2px;border-radius:3px;"></div></div>'
 
-        f'<div style="font-size:9px;font-weight:700;color:#444;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;">AFFECTED MARKETS</div>'
+        f'<div style="font-size:9px;font-weight:700;color:#555;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;">AFFECTED MARKETS</div>'
         + stock_rows_html +
         f'</div>'
     )
