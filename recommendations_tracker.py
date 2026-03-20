@@ -2,9 +2,12 @@
 recommendations_tracker.py — Log and track Global Pulse Trader recommendations.
 
 Stores each recommendation to the `recommendations_log` DB table with an entry
-price fetched at logging time.  Performance is evaluated at T+3 and T+5 business
-days (not same-day) using Yahoo Finance historical data, benchmarked against SPY
-to compute market-relative alpha.
+price fetched at logging time.  Performance is evaluated at T+3, T+5, T+7, and
+T+10 business days (not same-day) using Yahoo Finance historical data, benchmarked
+against SPY to compute market-relative alpha.
+
+T+3/T+5 capture short-term momentum; T+7/T+10 capture the slower media-driven
+weather signal that typically takes 1–2 weeks to fully price in.
 
 Usage:
     from recommendations_tracker import ensure_schema, log_recommendations, get_aftermath_table
@@ -46,12 +49,16 @@ CREATE TABLE IF NOT EXISTS recommendations_log (
 
 # Schema migrations — safe to run multiple times (ADD COLUMN IF NOT EXISTS)
 _MIGRATE_STMTS = [
-    # T+3/T+5 snapshot columns
+    # T+3/T+5/T+7/T+10 snapshot columns
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_entry      DOUBLE PRECISION",
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS price_t3       DOUBLE PRECISION",
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS price_t5       DOUBLE PRECISION",
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_t3         DOUBLE PRECISION",
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_t5         DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS price_t7       DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS price_t10      DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_t7         DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_t10        DOUBLE PRECISION",
     # ML feature snapshot columns — values captured at logging time
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS sigma_score     FLOAT",
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS seasonality_sc  FLOAT",
@@ -186,7 +193,7 @@ def _closest_price_on_or_before(history: dict[date, float], target: date) -> Opt
 
 def _maybe_persist_snapshots(df: pd.DataFrame) -> None:
     """
-    For rows where T+3 or T+5 dates have arrived and prices are still NULL,
+    For rows where T+3/T+5/T+7/T+10 dates have arrived and prices are still NULL,
     fetch historical closing prices from Yahoo Finance and persist them to DB.
     Also captures SPY prices for alpha computation.
     Mutates `df` in-place.
@@ -196,16 +203,24 @@ def _maybe_persist_snapshots(df: pd.DataFrame) -> None:
 
     today = datetime.now(timezone.utc).date()
 
-    need_t3 = df[
-        df["price_t3"].isna() &
-        df["logged_at"].apply(lambda x: _business_days_after(x, 3) <= today)
-    ]
-    need_t5 = df[
-        df["price_t5"].isna() &
-        df["logged_at"].apply(lambda x: _business_days_after(x, 5) <= today)
+    horizons = [
+        (3,  "price_t3",  "spy_t3"),
+        (5,  "price_t5",  "spy_t5"),
+        (7,  "price_t7",  "spy_t7"),
+        (10, "price_t10", "spy_t10"),
     ]
 
-    if need_t3.empty and need_t5.empty:
+    # Collect rows that need snapshots for each horizon
+    needs: dict[int, pd.DataFrame] = {}
+    for n, price_col, _ in horizons:
+        if price_col not in df.columns:
+            df[price_col] = None
+        col_mask = df[price_col].isna() & df["logged_at"].apply(
+            lambda x: _business_days_after(x, n) <= today
+        )
+        needs[n] = df[col_mask]
+
+    if all(v.empty for v in needs.values()):
         return
 
     # ── Build per-symbol date ranges to fetch ─────────────────────────────────
@@ -215,15 +230,11 @@ def _maybe_persist_snapshots(df: pd.DataFrame) -> None:
         lo, hi = fetch_ranges.get(sym, (d, d))
         fetch_ranges[sym] = (min(lo, d), max(hi, d))
 
-    for _, row in need_t3.iterrows():
-        d = _business_days_after(row["logged_at"], 3)
-        _extend(row["stock_symbol"], d)
-        _extend("SPY", d)
-
-    for _, row in need_t5.iterrows():
-        d = _business_days_after(row["logged_at"], 5)
-        _extend(row["stock_symbol"], d)
-        _extend("SPY", d)
+    for n, _, _ in horizons:
+        for _, row in needs[n].iterrows():
+            d = _business_days_after(row["logged_at"], n)
+            _extend(row["stock_symbol"], d)
+            _extend("SPY", d)
 
     # ── One Yahoo Finance call per symbol ─────────────────────────────────────
     histories: dict[str, dict[date, float]] = {}
@@ -233,27 +244,19 @@ def _maybe_persist_snapshots(df: pd.DataFrame) -> None:
     # ── Populate df and collect DB updates ────────────────────────────────────
     db_updates: list[tuple] = []  # (col, val, id)
 
-    for idx, row in need_t3.iterrows():
-        t3_date = _business_days_after(row["logged_at"], 3)
-        price   = _closest_price_on_or_before(histories.get(row["stock_symbol"], {}), t3_date)
-        spy_p   = _closest_price_on_or_before(histories.get("SPY", {}), t3_date)
-        if price is not None:
-            df.at[idx, "price_t3"] = price
-            db_updates.append(("price_t3", price, int(row["id"])))
-        if spy_p is not None:
-            df.at[idx, "spy_t3"] = spy_p
-            db_updates.append(("spy_t3", spy_p, int(row["id"])))
-
-    for idx, row in need_t5.iterrows():
-        t5_date = _business_days_after(row["logged_at"], 5)
-        price   = _closest_price_on_or_before(histories.get(row["stock_symbol"], {}), t5_date)
-        spy_p   = _closest_price_on_or_before(histories.get("SPY", {}), t5_date)
-        if price is not None:
-            df.at[idx, "price_t5"] = price
-            db_updates.append(("price_t5", price, int(row["id"])))
-        if spy_p is not None:
-            df.at[idx, "spy_t5"] = spy_p
-            db_updates.append(("spy_t5", spy_p, int(row["id"])))
+    for n, price_col, spy_col in horizons:
+        if spy_col not in df.columns:
+            df[spy_col] = None
+        for idx, row in needs[n].iterrows():
+            target_date = _business_days_after(row["logged_at"], n)
+            price = _closest_price_on_or_before(histories.get(row["stock_symbol"], {}), target_date)
+            spy_p = _closest_price_on_or_before(histories.get("SPY", {}), target_date)
+            if price is not None:
+                df.at[idx, price_col] = price
+                db_updates.append((price_col, price, int(row["id"])))
+            if spy_p is not None:
+                df.at[idx, spy_col] = spy_p
+                db_updates.append((spy_col, spy_p, int(row["id"])))
 
     # ── Persist to DB ─────────────────────────────────────────────────────────
     if db_updates:
@@ -426,6 +429,7 @@ def get_aftermath_table() -> pd.DataFrame:
                        entry_price, spy_entry, region, anomaly, commodity,
                        final_trade_score, conviction, why_it_matters,
                        price_t3, price_t5, spy_t3, spy_t5,
+                       price_t7, price_t10, spy_t7, spy_t10,
                        sigma_score, seasonality_sc, trend_dir,
                        confluence_bonus, pheno_mult
                 FROM recommendations_log
@@ -444,10 +448,10 @@ def get_aftermath_table() -> pd.DataFrame:
     # ── Step 1: Persist T+3/T+5 snapshots where due ───────────────────────────
     _maybe_persist_snapshots(df)
 
-    # ── Step 2: Fetch live prices for open positions (T+5 not yet due) ────────
+    # ── Step 2: Fetch live prices for open positions (T+10 not yet due) ─────
     today = datetime.now(timezone.utc).date()
-    open_mask = df["price_t5"].isna() & df["logged_at"].apply(
-        lambda x: _business_days_after(x, 5) > today
+    open_mask = df["price_t10"].isna() & df["logged_at"].apply(
+        lambda x: _business_days_after(x, 10) > today
     )
     open_symbols = df.loc[open_mask, "stock_symbol"].dropna().unique().tolist()
     live_symbols = list(set(open_symbols) | ({"SPY"} if open_symbols else set()))
@@ -483,6 +487,12 @@ def get_aftermath_table() -> pd.DataFrame:
     df["pnl_t5"] = df.apply(
         lambda r: _compute_pnl(r["trade"], r.get("entry_price"), r.get("price_t5")), axis=1
     )
+    df["pnl_t7"] = df.apply(
+        lambda r: _compute_pnl(r["trade"], r.get("entry_price"), r.get("price_t7")), axis=1
+    )
+    df["pnl_t10"] = df.apply(
+        lambda r: _compute_pnl(r["trade"], r.get("entry_price"), r.get("price_t10")), axis=1
+    )
     df["alpha_t3"] = df.apply(
         lambda r: _compute_alpha(
             r["trade"], r.get("entry_price"), r.get("price_t3"),
@@ -495,11 +505,25 @@ def get_aftermath_table() -> pd.DataFrame:
             r.get("spy_entry"), r.get("spy_t5")
         ), axis=1
     )
+    df["alpha_t7"] = df.apply(
+        lambda r: _compute_alpha(
+            r["trade"], r.get("entry_price"), r.get("price_t7"),
+            r.get("spy_entry"), r.get("spy_t7")
+        ), axis=1
+    )
+    df["alpha_t10"] = df.apply(
+        lambda r: _compute_alpha(
+            r["trade"], r.get("entry_price"), r.get("price_t10"),
+            r.get("spy_entry"), r.get("spy_t10")
+        ), axis=1
+    )
 
-    # Best available P&L for Outcome: prefer T+5 > T+3 > current
+    # Best available P&L for Outcome: prefer T+10 > T+7 > T+5 > T+3 > current
     df["best_pnl"] = df.apply(
-        lambda r: r["pnl_t5"] if r["pnl_t5"] is not None
-                  else r["pnl_t3"] if r["pnl_t3"] is not None
+        lambda r: r["pnl_t10"] if r["pnl_t10"] is not None
+                  else r["pnl_t7"]  if r["pnl_t7"]  is not None
+                  else r["pnl_t5"]  if r["pnl_t5"]  is not None
+                  else r["pnl_t3"]  if r["pnl_t3"]  is not None
                   else r["pnl_current"],
         axis=1,
     )
@@ -528,6 +552,10 @@ def get_aftermath_table() -> pd.DataFrame:
         "T+3 α SPY":    df["alpha_t3"].apply(fmt_alpha),
         "T+5 P&L":      df["pnl_t5"].apply(lambda x: fmt(x, suffix="%", sign=True)),
         "T+5 α SPY":    df["alpha_t5"].apply(fmt_alpha),
+        "T+7 P&L":      df["pnl_t7"].apply(lambda x: fmt(x, suffix="%", sign=True)),
+        "T+7 α SPY":    df["alpha_t7"].apply(fmt_alpha),
+        "T+10 P&L":     df["pnl_t10"].apply(lambda x: fmt(x, suffix="%", sign=True)),
+        "T+10 α SPY":   df["alpha_t10"].apply(fmt_alpha),
         "Outcome":      df["outcome"],
         "Score":        df["final_trade_score"].round(2),
         "Conviction":   df["conviction"],
@@ -535,11 +563,15 @@ def get_aftermath_table() -> pd.DataFrame:
         "Anomaly":      df["anomaly"],
         "Why":          df["why_it_matters"],
         # Hidden raw columns for stats / ML
-        "_pnl_raw":      df["best_pnl"],
-        "_pnl_t3_raw":   df["pnl_t3"],
-        "_pnl_t5_raw":   df["pnl_t5"],
-        "_alpha_t3_raw": df["alpha_t3"],
-        "_alpha_t5_raw": df["alpha_t5"],
+        "_pnl_raw":       df["best_pnl"],
+        "_pnl_t3_raw":    df["pnl_t3"],
+        "_pnl_t5_raw":    df["pnl_t5"],
+        "_pnl_t7_raw":    df["pnl_t7"],
+        "_pnl_t10_raw":   df["pnl_t10"],
+        "_alpha_t3_raw":  df["alpha_t3"],
+        "_alpha_t5_raw":  df["alpha_t5"],
+        "_alpha_t7_raw":  df["alpha_t7"],
+        "_alpha_t10_raw": df["alpha_t10"],
         # ML feature snapshot columns
         "_sigma":      df["sigma_score"] if "sigma_score" in df.columns else pd.Series(1.0, index=df.index),
         "_seasonality": df["seasonality_sc"] if "seasonality_sc" in df.columns else pd.Series(5.0, index=df.index),
@@ -570,17 +602,21 @@ def get_performance_summary(aftermath_df: pd.DataFrame) -> dict:
     best_idx  = pnl_series.idxmax()
     worst_idx = pnl_series.idxmin()
 
-    t3_count = aftermath_df["_pnl_t3_raw"].dropna().shape[0] if "_pnl_t3_raw" in aftermath_df.columns else 0
-    t5_count = aftermath_df["_pnl_t5_raw"].dropna().shape[0] if "_pnl_t5_raw" in aftermath_df.columns else 0
+    t3_count  = aftermath_df["_pnl_t3_raw"].dropna().shape[0]  if "_pnl_t3_raw"  in aftermath_df.columns else 0
+    t5_count  = aftermath_df["_pnl_t5_raw"].dropna().shape[0]  if "_pnl_t5_raw"  in aftermath_df.columns else 0
+    t7_count  = aftermath_df["_pnl_t7_raw"].dropna().shape[0]  if "_pnl_t7_raw"  in aftermath_df.columns else 0
+    t10_count = aftermath_df["_pnl_t10_raw"].dropna().shape[0] if "_pnl_t10_raw" in aftermath_df.columns else 0
 
     return {
-        "total":        total,
-        "wins":         int(wins),
-        "losses":       int(losses),
-        "win_rate":     round(wins / total * 100, 1) if total else 0,
-        "avg_pnl":      round(float(pnl_series.mean()), 2),
-        "best_trade":   f"{aftermath_df.loc[best_idx, 'Stock']} {pnl_series[best_idx]:+.2f}%",
-        "worst_trade":  f"{aftermath_df.loc[worst_idx, 'Stock']} {pnl_series[worst_idx]:+.2f}%",
-        "t3_evaluated": t3_count,
-        "t5_evaluated": t5_count,
+        "total":         total,
+        "wins":          int(wins),
+        "losses":        int(losses),
+        "win_rate":      round(wins / total * 100, 1) if total else 0,
+        "avg_pnl":       round(float(pnl_series.mean()), 2),
+        "best_trade":    f"{aftermath_df.loc[best_idx, 'Stock']} {pnl_series[best_idx]:+.2f}%",
+        "worst_trade":   f"{aftermath_df.loc[worst_idx, 'Stock']} {pnl_series[worst_idx]:+.2f}%",
+        "t3_evaluated":  t3_count,
+        "t5_evaluated":  t5_count,
+        "t7_evaluated":  t7_count,
+        "t10_evaluated": t10_count,
     }
