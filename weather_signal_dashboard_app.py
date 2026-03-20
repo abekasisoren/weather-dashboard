@@ -3017,23 +3017,28 @@ with tab_aftermath:
         # ── Performance metrics ───────────────────────────────────────────────
         perf = get_performance_summary(aftermath_df)
         if perf:
-            m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
-            m1.metric("Total Logged",  perf["total"])
-            m2.metric("Win Rate",      f"{perf['win_rate']}%",
-                      help="Based on best available P&L (T+5 > T+3 > Day 0)")
-            m3.metric("Avg P&L",       f"{perf['avg_pnl']:+.2f}%")
-            m4.metric("Best Trade",    perf["best_trade"])
-            m5.metric("Worst Trade",   perf["worst_trade"])
-            m6.metric("T+3 Evaluated", perf.get("t3_evaluated", 0),
-                      help="Trades with a T+3 snapshot (3 business days after entry)")
-            m7.metric("T+5 Evaluated", perf.get("t5_evaluated", 0),
-                      help="Trades with a T+5 snapshot (5 business days after entry)")
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Total Logged", perf["total"])
+            m2.metric("Win Rate",     f"{perf['win_rate']}%",
+                      help="Based on best available P&L (T+10 > T+7 > T+5 > T+3 > Day 0)")
+            m3.metric("Avg P&L",      f"{perf['avg_pnl']:+.2f}%")
+            m4.metric("Best Trade",   perf["best_trade"])
+            m5.metric("Worst Trade",  perf["worst_trade"])
+
+            e1, e2, e3, e4 = st.columns(4)
+            e1.metric("T+3 Evaluated",  perf.get("t3_evaluated",  0),
+                      help="Trades with a 3-business-day closing price snapshot")
+            e2.metric("T+5 Evaluated",  perf.get("t5_evaluated",  0),
+                      help="Trades with a 5-business-day closing price snapshot")
+            e3.metric("T+7 Evaluated",  perf.get("t7_evaluated",  0),
+                      help="Trades with a 7-business-day closing price snapshot")
+            e4.metric("T+10 Evaluated", perf.get("t10_evaluated", 0),
+                      help="Trades with a 10-business-day closing price snapshot (~2 weeks)")
 
         st.caption(
-            "📅 **Evaluation horizon**: P&L is measured at T+3 (3 business days) and T+5 "
-            "(5 business days) after the entry date using Yahoo Finance closing prices. "
-            "Day 0 P&L (same-day) is shown for reference only — weather signals need "
-            "2–5 days to materialise."
+            "📅 **Evaluation horizons**: T+3 (momentum), T+5 (follow-through), "
+            "T+7 (media pick-up), T+10 (~2 weeks, full weather repricing). "
+            "Outcome uses the latest available snapshot. Day 0 shown for reference only."
         )
 
         st.divider()
@@ -3041,8 +3046,11 @@ with tab_aftermath:
         # ── Colour-coded P&L table ────────────────────────────────────────────
         display_cols = [
             "Date Logged", "Stock", "Trade", "Entry",
-            "Day 0 P&L", "T+3 P&L", "T+3 α SPY",
-            "T+5 P&L",   "T+5 α SPY",
+            "Day 0 P&L",
+            "T+3 P&L",  "T+3 α SPY",
+            "T+5 P&L",  "T+5 α SPY",
+            "T+7 P&L",  "T+7 α SPY",
+            "T+10 P&L", "T+10 α SPY",
             "Outcome", "Score", "Conviction", "Region", "Anomaly",
         ]
 
@@ -3066,7 +3074,7 @@ with tab_aftermath:
 
         # ── Why column in expander ────────────────────────────────────────────
         with st.expander("Show 'Why It Mattered' for all recommendations"):
-            why_cols = ["Date Logged", "Stock", "Trade", "T+3 P&L", "T+5 P&L", "Outcome", "Why"]
+            why_cols = ["Date Logged", "Stock", "Trade", "T+3 P&L", "T+5 P&L", "T+7 P&L", "T+10 P&L", "Outcome", "Why"]
             st.dataframe(
                 aftermath_df[[c for c in why_cols if c in aftermath_df.columns]],
                 use_container_width=True,
