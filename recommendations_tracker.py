@@ -2,7 +2,9 @@
 recommendations_tracker.py — Log and track Global Pulse Trader recommendations.
 
 Stores each recommendation to the `recommendations_log` DB table with an entry
-price fetched at logging time, then computes P&L using current prices (yfinance).
+price fetched at logging time.  Performance is evaluated at T+3 and T+5 business
+days (not same-day) using Yahoo Finance historical data, benchmarked against SPY
+to compute market-relative alpha.
 
 Usage:
     from recommendations_tracker import ensure_schema, log_recommendations, get_aftermath_table
@@ -12,11 +14,11 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import psycopg
 
@@ -42,18 +44,28 @@ CREATE TABLE IF NOT EXISTS recommendations_log (
 );
 """
 
+# Columns added in the T+3/T+5 upgrade — safe to run multiple times
+_MIGRATE_STMTS = [
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_entry  DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS price_t3   DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS price_t5   DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_t3     DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_t5     DOUBLE PRECISION",
+]
+
 
 def ensure_schema() -> None:
-    """Create recommendations_log table if it does not exist."""
+    """Create recommendations_log table if it does not exist, then migrate columns."""
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(CREATE_TABLE_SQL)
+            for stmt in _MIGRATE_STMTS:
+                cur.execute(stmt)
         conn.commit()
 
 
-# ─── Price fetching ───────────────────────────────────────────────────────────
+# ─── Live price fetching (Finnhub) ────────────────────────────────────────────
 
-# Errors from last fetch_prices() call — read by dashboard for debug display
 _fetch_errors: list[str] = []
 
 
@@ -62,20 +74,13 @@ def get_fetch_errors() -> list[str]:
     return list(_fetch_errors)
 
 
-_FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "")
-
-
 def _finnhub_price(symbol: str, api_key: str) -> Optional[float]:
-    """
-    Fetch current price from Finnhub (~15-min delayed).
-    Finnhub works from any cloud IP — no 429 rate-limit issues.
-    Free tier: 60 calls/min.  Sign up at https://finnhub.io
-    """
+    """Fetch current ~15-min-delayed price from Finnhub."""
     url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={api_key}"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode())
-    price = data.get("c")  # 'c' = current price
+    price = data.get("c")
     if price and float(price) > 0:
         return round(float(price), 4)
     return None
@@ -83,9 +88,8 @@ def _finnhub_price(symbol: str, api_key: str) -> Optional[float]:
 
 def fetch_prices(symbols: list[str]) -> dict[str, Optional[float]]:
     """
-    Fetch latest prices (~15-min delayed intraday) for a list of symbols.
-    Uses Finnhub API — requires FINNHUB_API_KEY env var (free at finnhub.io).
-    Errors captured in _fetch_errors for dashboard debug display.
+    Fetch latest prices for a list of symbols via Finnhub.
+    Requires FINNHUB_API_KEY env var (free at finnhub.io).
     """
     global _fetch_errors
     _fetch_errors = []
@@ -117,12 +121,151 @@ def fetch_prices(symbols: list[str]) -> dict[str, Optional[float]]:
     return prices
 
 
+# ─── Historical price fetching (Yahoo Finance, for T+3 / T+5 snapshots) ───────
+
+def _business_days_after(start, n: int) -> date:
+    """Return the date that is n business days after `start` (datetime or date)."""
+    d = start.date() if hasattr(start, "date") else start
+    result = np.busday_offset(d.isoformat(), n, roll="forward")
+    return result.astype("O")  # converts numpy datetime64 → datetime.date
+
+
+def _yahoo_history_range(symbol: str, start_d: date, end_d: date) -> dict[date, float]:
+    """
+    Fetch daily closing prices from Yahoo Finance chart API (no library needed).
+    Returns {date: close_price} dict for the requested range.
+    """
+    start_ts = int(datetime.combine(start_d, datetime.min.time()).timestamp())
+    end_ts   = int(datetime.combine(end_d + timedelta(days=1), datetime.min.time()).timestamp())
+
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        f"?interval=1d&period1={start_ts}&period2={end_ts}"
+    )
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; WeatherTrader/1.0)",
+        "Accept":     "application/json",
+    })
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
+        return {}
+
+    try:
+        result = data["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        closes     = result["indicators"]["quote"][0]["close"]
+    except (KeyError, IndexError, TypeError):
+        return {}
+
+    history: dict[date, float] = {}
+    for ts, close in zip(timestamps, closes):
+        if close is not None and float(close) > 0:
+            d = datetime.fromtimestamp(ts, tz=timezone.utc).date()
+            history[d] = round(float(close), 4)
+
+    return history
+
+
+def _closest_price_on_or_before(history: dict[date, float], target: date) -> Optional[float]:
+    """Return the price on target date or the nearest prior trading day."""
+    past = [d for d in history if d <= target]
+    if not past:
+        return None
+    return history[max(past)]
+
+
+def _maybe_persist_snapshots(df: pd.DataFrame) -> None:
+    """
+    For rows where T+3 or T+5 dates have arrived and prices are still NULL,
+    fetch historical closing prices from Yahoo Finance and persist them to DB.
+    Also captures SPY prices for alpha computation.
+    Mutates `df` in-place.
+    """
+    if not DATABASE_URL:
+        return
+
+    today = datetime.now(timezone.utc).date()
+
+    need_t3 = df[
+        df["price_t3"].isna() &
+        df["logged_at"].apply(lambda x: _business_days_after(x, 3) <= today)
+    ]
+    need_t5 = df[
+        df["price_t5"].isna() &
+        df["logged_at"].apply(lambda x: _business_days_after(x, 5) <= today)
+    ]
+
+    if need_t3.empty and need_t5.empty:
+        return
+
+    # ── Build per-symbol date ranges to fetch ─────────────────────────────────
+    fetch_ranges: dict[str, tuple[date, date]] = {}
+
+    def _extend(sym: str, d: date) -> None:
+        lo, hi = fetch_ranges.get(sym, (d, d))
+        fetch_ranges[sym] = (min(lo, d), max(hi, d))
+
+    for _, row in need_t3.iterrows():
+        d = _business_days_after(row["logged_at"], 3)
+        _extend(row["stock_symbol"], d)
+        _extend("SPY", d)
+
+    for _, row in need_t5.iterrows():
+        d = _business_days_after(row["logged_at"], 5)
+        _extend(row["stock_symbol"], d)
+        _extend("SPY", d)
+
+    # ── One Yahoo Finance call per symbol ─────────────────────────────────────
+    histories: dict[str, dict[date, float]] = {}
+    for sym, (lo, hi) in fetch_ranges.items():
+        histories[sym] = _yahoo_history_range(sym, lo - timedelta(days=5), hi + timedelta(days=2))
+
+    # ── Populate df and collect DB updates ────────────────────────────────────
+    db_updates: list[tuple] = []  # (col, val, id)
+
+    for idx, row in need_t3.iterrows():
+        t3_date = _business_days_after(row["logged_at"], 3)
+        price   = _closest_price_on_or_before(histories.get(row["stock_symbol"], {}), t3_date)
+        spy_p   = _closest_price_on_or_before(histories.get("SPY", {}), t3_date)
+        if price is not None:
+            df.at[idx, "price_t3"] = price
+            db_updates.append(("price_t3", price, int(row["id"])))
+        if spy_p is not None:
+            df.at[idx, "spy_t3"] = spy_p
+            db_updates.append(("spy_t3", spy_p, int(row["id"])))
+
+    for idx, row in need_t5.iterrows():
+        t5_date = _business_days_after(row["logged_at"], 5)
+        price   = _closest_price_on_or_before(histories.get(row["stock_symbol"], {}), t5_date)
+        spy_p   = _closest_price_on_or_before(histories.get("SPY", {}), t5_date)
+        if price is not None:
+            df.at[idx, "price_t5"] = price
+            db_updates.append(("price_t5", price, int(row["id"])))
+        if spy_p is not None:
+            df.at[idx, "spy_t5"] = spy_p
+            db_updates.append(("spy_t5", spy_p, int(row["id"])))
+
+    # ── Persist to DB ─────────────────────────────────────────────────────────
+    if db_updates:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                for col, val, row_id in db_updates:
+                    cur.execute(
+                        f"UPDATE recommendations_log SET {col} = %s WHERE id = %s",
+                        (val, row_id),
+                    )
+            conn.commit()
+
+
 # ─── Log recommendations ──────────────────────────────────────────────────────
 
 def get_recently_recommended_combos(hours: int = 24) -> set[tuple[str, str, str]]:
     """
     Return set of (stock_symbol, region, anomaly) tuples logged in the last N hours.
-    Used by the dashboard to show cooldown badges and suppress repeat logging.
+    Used to enforce cooldown and suppress repeat logging.
     """
     if not DATABASE_URL:
         return set()
@@ -146,10 +289,9 @@ def get_recently_recommended_combos(hours: int = 24) -> set[tuple[str, str, str]
 
 def log_recommendations(pulse_df: pd.DataFrame) -> int:
     """
-    Log current pulse trader recommendations to recommendations_log.
-    Cooldown rule: skips any (symbol, region, anomaly) combination already
-    logged within the last 24 hours — same stock can only be recommended
-    for the same weather event once per day.
+    Log current Pulse Trader recommendations to recommendations_log.
+    - Fetches entry price (Finnhub) + SPY entry price for benchmark at time of logging.
+    - Cooldown: skips (symbol, region, anomaly) already logged in last 24 hours.
     Returns number of rows inserted.
     """
     if pulse_df.empty:
@@ -157,36 +299,36 @@ def log_recommendations(pulse_df: pd.DataFrame) -> int:
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # Fetch entry prices for all symbols
     symbols = pulse_df["Stock Trade"].dropna().unique().tolist()
-    prices = fetch_prices(symbols)
+    symbols_with_spy = list(set(symbols) | {"SPY"})
+    prices = fetch_prices(symbols_with_spy)
+    spy_entry = prices.get("SPY")
 
-    # Cooldown: fetch (symbol, region, anomaly) combos logged in last 24h
     already_logged = get_recently_recommended_combos(hours=24)
 
     rows_to_insert = []
     for _, row in pulse_df.iterrows():
-        symbol = str(row.get("Stock Trade", "")).strip()
-        trade  = str(row.get("Trade", "")).strip()
-        region = str(row.get("Region", "")).strip()
+        symbol  = str(row.get("Stock Trade", "")).strip()
+        trade   = str(row.get("Trade", "")).strip()
+        region  = str(row.get("Region", "")).strip()
         anomaly = str(row.get("Anomaly", "")).strip()
         if not symbol or trade == "No Trade":
             continue
-        # 24-hour cooldown: skip if this (symbol, region, anomaly) was already logged
         if (symbol, region, anomaly) in already_logged:
             continue
 
         rows_to_insert.append({
-            "signal_date": row.get("Date", today),
-            "stock_symbol": symbol,
-            "trade": trade,
-            "entry_price": prices.get(symbol),
-            "region": str(row.get("Region", "")),
-            "anomaly": str(row.get("Anomaly", "")),
-            "commodity": str(row.get("Commodity", "")),
+            "signal_date":       row.get("Date", today),
+            "stock_symbol":      symbol,
+            "trade":             trade,
+            "entry_price":       prices.get(symbol),
+            "spy_entry":         spy_entry,
+            "region":            str(row.get("Region", "")),
+            "anomaly":           str(row.get("Anomaly", "")),
+            "commodity":         str(row.get("Commodity", "")),
             "final_trade_score": float(row.get("Final Trade Score", 0)),
-            "conviction": str(row.get("Conviction", "")),
-            "why_it_matters": str(row.get("Why It Matters", ""))[:500],
+            "conviction":        str(row.get("Conviction", "")),
+            "why_it_matters":    str(row.get("Why It Matters", ""))[:500],
         })
 
     if not rows_to_insert:
@@ -198,11 +340,12 @@ def log_recommendations(pulse_df: pd.DataFrame) -> int:
                 cur.execute(
                     """
                     INSERT INTO recommendations_log
-                        (signal_date, stock_symbol, trade, entry_price,
+                        (signal_date, stock_symbol, trade, entry_price, spy_entry,
                          region, anomaly, commodity, final_trade_score,
                          conviction, why_it_matters)
                     VALUES (%(signal_date)s, %(stock_symbol)s, %(trade)s,
-                            %(entry_price)s, %(region)s, %(anomaly)s,
+                            %(entry_price)s, %(spy_entry)s,
+                            %(region)s, %(anomaly)s,
                             %(commodity)s, %(final_trade_score)s,
                             %(conviction)s, %(why_it_matters)s)
                     """,
@@ -213,20 +356,59 @@ def log_recommendations(pulse_df: pd.DataFrame) -> int:
     return len(rows_to_insert)
 
 
+# ─── P&L helpers ──────────────────────────────────────────────────────────────
+
+def _compute_pnl(
+    trade: str, entry: Optional[float], exit_price: Optional[float]
+) -> Optional[float]:
+    if entry is None or exit_price is None or entry == 0:
+        return None
+    if trade == "Long":
+        return round((exit_price - entry) / entry * 100, 2)
+    if trade == "Short":
+        return round((entry - exit_price) / entry * 100, 2)
+    return None
+
+
+def _compute_alpha(
+    trade: str,
+    entry: Optional[float],
+    exit_price: Optional[float],
+    spy_entry: Optional[float],
+    spy_exit: Optional[float],
+) -> Optional[float]:
+    """Stock P&L minus SPY P&L over the same period (market-relative return)."""
+    stock_pnl = _compute_pnl(trade, entry, exit_price)
+    spy_pnl   = _compute_pnl("Long", spy_entry, spy_exit)  # SPY is always Long
+    if stock_pnl is None or spy_pnl is None:
+        return None
+    return round(stock_pnl - spy_pnl, 2)
+
+
+def _outcome_label(pnl: Optional[float]) -> str:
+    if pnl is None:
+        return "⏳ Pending"
+    return "✅ Win" if pnl > 0 else "❌ Loss" if pnl < 0 else "➖ Flat"
+
+
 # ─── Aftermath table ──────────────────────────────────────────────────────────
 
 def get_aftermath_table() -> pd.DataFrame:
     """
-    Load all logged recommendations, enrich with current prices, compute P&L.
-    Returns a DataFrame ready for display.
+    Load all logged recommendations.
+    1. Persist T+3 / T+5 historical snapshots for rows that are due.
+    2. Fetch live Finnhub prices for still-open positions (< T+5).
+    3. Compute multi-horizon P&L and alpha vs SPY.
+    4. Return enriched display DataFrame.
     """
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT id, logged_at, signal_date, stock_symbol, trade,
-                       entry_price, region, anomaly, commodity,
-                       final_trade_score, conviction, why_it_matters
+                       entry_price, spy_entry, region, anomaly, commodity,
+                       final_trade_score, conviction, why_it_matters,
+                       price_t3, price_t5, spy_t3, spy_t5
                 FROM recommendations_log
                 ORDER BY logged_at DESC
                 """
@@ -238,19 +420,31 @@ def get_aftermath_table() -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.DataFrame(rows, columns=cols)
+    df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True)
 
-    # Fetch current prices for all unique symbols
-    symbols = df["stock_symbol"].dropna().unique().tolist()
-    current_prices = fetch_prices(symbols)
-    df["current_price"] = df["stock_symbol"].map(current_prices)
+    # ── Step 1: Persist T+3/T+5 snapshots where due ───────────────────────────
+    _maybe_persist_snapshots(df)
 
-    # Backfill missing entry prices: if entry_price is NULL, use current price as proxy
-    # and persist to DB so future loads have it
-    null_mask = df["entry_price"].isna()
-    if null_mask.any():
+    # ── Step 2: Fetch live prices for open positions (T+5 not yet due) ────────
+    today = datetime.now(timezone.utc).date()
+    open_mask = df["price_t5"].isna() & df["logged_at"].apply(
+        lambda x: _business_days_after(x, 5) > today
+    )
+    open_symbols = df.loc[open_mask, "stock_symbol"].dropna().unique().tolist()
+    live_symbols = list(set(open_symbols) | ({"SPY"} if open_symbols else set()))
+    current_prices = fetch_prices(live_symbols) if live_symbols else {}
+
+    df["current_price"] = df["stock_symbol"].apply(
+        lambda s: current_prices.get(s)
+    )
+    spy_current = current_prices.get("SPY")
+
+    # Backfill NULL entry prices with current price as proxy (persisted)
+    null_entry_mask = df["entry_price"].isna()
+    if null_entry_mask.any():
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
-                for idx, row in df[null_mask].iterrows():
+                for idx, row in df[null_entry_mask].iterrows():
                     bp = current_prices.get(row["stock_symbol"])
                     if bp is not None:
                         cur.execute(
@@ -260,51 +454,83 @@ def get_aftermath_table() -> pd.DataFrame:
                         df.at[idx, "entry_price"] = bp
             conn.commit()
 
-    # Compute P&L
-    def compute_pnl(row):
-        entry = row.get("entry_price")
-        current = row.get("current_price")
-        trade = str(row.get("trade", "")).strip()
-        if entry is None or current is None or entry == 0:
-            return None
-        if trade == "Long":
-            return round((current - entry) / entry * 100, 2)
-        if trade == "Short":
-            return round((entry - current) / entry * 100, 2)
-        return None
+    # ── Step 3: Compute P&L at each horizon ───────────────────────────────────
+    df["pnl_current"] = df.apply(
+        lambda r: _compute_pnl(r["trade"], r.get("entry_price"), r.get("current_price")), axis=1
+    )
+    df["pnl_t3"] = df.apply(
+        lambda r: _compute_pnl(r["trade"], r.get("entry_price"), r.get("price_t3")), axis=1
+    )
+    df["pnl_t5"] = df.apply(
+        lambda r: _compute_pnl(r["trade"], r.get("entry_price"), r.get("price_t5")), axis=1
+    )
+    df["alpha_t3"] = df.apply(
+        lambda r: _compute_alpha(
+            r["trade"], r.get("entry_price"), r.get("price_t3"),
+            r.get("spy_entry"), r.get("spy_t3")
+        ), axis=1
+    )
+    df["alpha_t5"] = df.apply(
+        lambda r: _compute_alpha(
+            r["trade"], r.get("entry_price"), r.get("price_t5"),
+            r.get("spy_entry"), r.get("spy_t5")
+        ), axis=1
+    )
 
-    df["pnl_pct"] = df.apply(compute_pnl, axis=1)
+    # Best available P&L for Outcome: prefer T+5 > T+3 > current
+    df["best_pnl"] = df.apply(
+        lambda r: r["pnl_t5"] if r["pnl_t5"] is not None
+                  else r["pnl_t3"] if r["pnl_t3"] is not None
+                  else r["pnl_current"],
+        axis=1,
+    )
+    df["outcome"] = df["best_pnl"].apply(_outcome_label)
 
-    def outcome(pnl):
-        if pnl is None:
+    # ── Step 4: Build display DataFrame ───────────────────────────────────────
+    def fmt(x, prefix="", suffix="", decimals=2, sign=False):
+        if x is None or (isinstance(x, float) and pd.isna(x)):
             return "—"
-        return "✅ Win" if pnl > 0 else "❌ Loss" if pnl < 0 else "➖ Flat"
+        fmt_str = f"{prefix}{x:+.{decimals}f}{suffix}" if sign else f"{prefix}{x:.{decimals}f}{suffix}"
+        return fmt_str
 
-    df["outcome"] = df["pnl_pct"].apply(outcome)
+    def fmt_alpha(x):
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return "—"
+        arrow = "↑" if x > 0 else ("↓" if x < 0 else "→")
+        return f"{arrow}{abs(x):.2f}%"
 
-    # Format for display
     display = pd.DataFrame({
-        "Date Logged":    pd.to_datetime(df["logged_at"]).dt.strftime("%Y-%m-%d"),
-        "Signal Date":    df["signal_date"],
-        "Stock":          df["stock_symbol"],
-        "Trade":          df["trade"],
-        "Entry Price":    df["entry_price"].apply(lambda x: f"${x:.2f}" if x else "—"),
-        "Current Price":  df["current_price"].apply(lambda x: f"${x:.2f}" if x else "—"),
-        "P&L %":          df["pnl_pct"].apply(lambda x: f"{x:+.2f}%" if x is not None else "—"),
-        "Outcome":        df["outcome"],
-        "Score":          df["final_trade_score"].round(2),
-        "Conviction":     df["conviction"],
-        "Region":         df["region"],
-        "Anomaly":        df["anomaly"],
-        "Why":            df["why_it_matters"],
-        "_pnl_raw":       df["pnl_pct"],   # for sorting / stats (hidden)
+        "Date Logged":  pd.to_datetime(df["logged_at"]).dt.strftime("%Y-%m-%d"),
+        "Stock":        df["stock_symbol"],
+        "Trade":        df["trade"],
+        "Entry":        df["entry_price"].apply(lambda x: fmt(x, prefix="$")),
+        "Day 0 P&L":    df["pnl_current"].apply(lambda x: fmt(x, suffix="%", sign=True)),
+        "T+3 P&L":      df["pnl_t3"].apply(lambda x: fmt(x, suffix="%", sign=True)),
+        "T+3 α SPY":    df["alpha_t3"].apply(fmt_alpha),
+        "T+5 P&L":      df["pnl_t5"].apply(lambda x: fmt(x, suffix="%", sign=True)),
+        "T+5 α SPY":    df["alpha_t5"].apply(fmt_alpha),
+        "Outcome":      df["outcome"],
+        "Score":        df["final_trade_score"].round(2),
+        "Conviction":   df["conviction"],
+        "Region":       df["region"],
+        "Anomaly":      df["anomaly"],
+        "Why":          df["why_it_matters"],
+        # Hidden raw columns for stats / ML
+        "_pnl_raw":      df["best_pnl"],
+        "_pnl_t3_raw":   df["pnl_t3"],
+        "_pnl_t5_raw":   df["pnl_t5"],
+        "_alpha_t3_raw": df["alpha_t3"],
+        "_alpha_t5_raw": df["alpha_t5"],
     })
 
     return display
 
 
 def get_performance_summary(aftermath_df: pd.DataFrame) -> dict:
-    """Compute win rate, avg P&L, best/worst trade from aftermath table."""
+    """
+    Compute win rate, avg P&L, best/worst trade.
+    Uses best available P&L (T+5 > T+3 > current) for each trade.
+    """
     if aftermath_df.empty:
         return {}
 
@@ -312,19 +538,24 @@ def get_performance_summary(aftermath_df: pd.DataFrame) -> dict:
     if pnl_series.empty:
         return {}
 
-    wins = (pnl_series > 0).sum()
+    wins   = (pnl_series > 0).sum()
     losses = (pnl_series < 0).sum()
-    total = len(pnl_series)
+    total  = len(pnl_series)
 
-    best_idx = pnl_series.idxmax()
+    best_idx  = pnl_series.idxmax()
     worst_idx = pnl_series.idxmin()
 
+    t3_count = aftermath_df["_pnl_t3_raw"].dropna().shape[0] if "_pnl_t3_raw" in aftermath_df.columns else 0
+    t5_count = aftermath_df["_pnl_t5_raw"].dropna().shape[0] if "_pnl_t5_raw" in aftermath_df.columns else 0
+
     return {
-        "total": total,
-        "wins": int(wins),
-        "losses": int(losses),
-        "win_rate": round(wins / total * 100, 1) if total else 0,
-        "avg_pnl": round(float(pnl_series.mean()), 2),
-        "best_trade": f"{aftermath_df.loc[best_idx, 'Stock']} {pnl_series[best_idx]:+.2f}%",
-        "worst_trade": f"{aftermath_df.loc[worst_idx, 'Stock']} {pnl_series[worst_idx]:+.2f}%",
+        "total":        total,
+        "wins":         int(wins),
+        "losses":       int(losses),
+        "win_rate":     round(wins / total * 100, 1) if total else 0,
+        "avg_pnl":      round(float(pnl_series.mean()), 2),
+        "best_trade":   f"{aftermath_df.loc[best_idx, 'Stock']} {pnl_series[best_idx]:+.2f}%",
+        "worst_trade":  f"{aftermath_df.loc[worst_idx, 'Stock']} {pnl_series[worst_idx]:+.2f}%",
+        "t3_evaluated": t3_count,
+        "t5_evaluated": t5_count,
     }

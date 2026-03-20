@@ -2933,7 +2933,7 @@ with tab_aftermath:
     if not aftermath_pulse.empty:
         col_log_info.caption(
             f"**{len(aftermath_pulse[aftermath_pulse['Trade'] != 'No Trade'])}** tradeable recommendations ready to log "
-            f"(entry prices fetched live from Yahoo Finance)"
+            f"(entry price via Finnhub; T+3/T+5 outcomes auto-evaluated after 3–5 business days)"
         )
         with st.expander("Preview recommendations to log"):
             st.dataframe(aftermath_pulse[_available_preview], use_container_width=True)
@@ -2973,7 +2973,7 @@ with tab_aftermath:
     # Auto-fetch on first load OR when button clicked
     if st.session_state["aftermath_df"] is None or fetch_clicked:
         try:
-            with st.spinner("Fetching live prices from Yahoo Finance…"):
+            with st.spinner("Fetching T+3/T+5 snapshots + live prices…"):
                 st.session_state["aftermath_df"] = get_aftermath_table()
                 st.session_state["aftermath_fetched_at"] = _dt.datetime.now().strftime("%H:%M:%S")
         except Exception as e:
@@ -3011,27 +3011,43 @@ with tab_aftermath:
         # ── Performance metrics ───────────────────────────────────────────────
         perf = get_performance_summary(aftermath_df)
         if perf:
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Total Logged", perf["total"])
-            m2.metric("Win Rate", f"{perf['win_rate']}%")
-            m3.metric("Avg P&L", f"{perf['avg_pnl']:+.2f}%")
-            m4.metric("Best Trade", perf["best_trade"])
-            m5.metric("Worst Trade", perf["worst_trade"])
+            m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+            m1.metric("Total Logged",  perf["total"])
+            m2.metric("Win Rate",      f"{perf['win_rate']}%",
+                      help="Based on best available P&L (T+5 > T+3 > Day 0)")
+            m3.metric("Avg P&L",       f"{perf['avg_pnl']:+.2f}%")
+            m4.metric("Best Trade",    perf["best_trade"])
+            m5.metric("Worst Trade",   perf["worst_trade"])
+            m6.metric("T+3 Evaluated", perf.get("t3_evaluated", 0),
+                      help="Trades with a T+3 snapshot (3 business days after entry)")
+            m7.metric("T+5 Evaluated", perf.get("t5_evaluated", 0),
+                      help="Trades with a T+5 snapshot (5 business days after entry)")
+
+        st.caption(
+            "📅 **Evaluation horizon**: P&L is measured at T+3 (3 business days) and T+5 "
+            "(5 business days) after the entry date using Yahoo Finance closing prices. "
+            "Day 0 P&L (same-day) is shown for reference only — weather signals need "
+            "2–5 days to materialise."
+        )
 
         st.divider()
 
         # ── Colour-coded P&L table ────────────────────────────────────────────
-        display_cols = ["Date Logged", "Stock", "Trade", "Entry Price",
-                        "Current Price", "P&L %", "Outcome", "Score",
-                        "Conviction", "Region", "Anomaly"]
+        display_cols = [
+            "Date Logged", "Stock", "Trade", "Entry",
+            "Day 0 P&L", "T+3 P&L", "T+3 α SPY",
+            "T+5 P&L",   "T+5 α SPY",
+            "Outcome", "Score", "Conviction", "Region", "Anomaly",
+        ]
 
         visible = aftermath_df[[c for c in display_cols if c in aftermath_df.columns]].copy()
 
         # Filter controls
         fc1, fc2, fc3 = st.columns(3)
-        trade_filter = fc1.multiselect("Trade", ["Long", "Short"], default=["Long", "Short"])
-        outcome_filter = fc2.multiselect("Outcome", ["✅ Win", "❌ Loss", "➖ Flat", "—"], default=["✅ Win", "❌ Loss", "➖ Flat", "—"])
-        conviction_vals = sorted(aftermath_df["Conviction"].dropna().unique().tolist())
+        trade_filter      = fc1.multiselect("Trade", ["Long", "Short"], default=["Long", "Short"])
+        all_outcomes      = ["✅ Win", "❌ Loss", "➖ Flat", "⏳ Pending", "—"]
+        outcome_filter    = fc2.multiselect("Outcome", all_outcomes, default=all_outcomes)
+        conviction_vals   = sorted(aftermath_df["Conviction"].dropna().unique().tolist())
         conviction_filter = fc3.multiselect("Conviction", conviction_vals, default=conviction_vals)
 
         visible = visible[
@@ -3044,7 +3060,7 @@ with tab_aftermath:
 
         # ── Why column in expander ────────────────────────────────────────────
         with st.expander("Show 'Why It Mattered' for all recommendations"):
-            why_cols = ["Date Logged", "Stock", "Trade", "P&L %", "Outcome", "Why"]
+            why_cols = ["Date Logged", "Stock", "Trade", "T+3 P&L", "T+5 P&L", "Outcome", "Why"]
             st.dataframe(
                 aftermath_df[[c for c in why_cols if c in aftermath_df.columns]],
                 use_container_width=True,
