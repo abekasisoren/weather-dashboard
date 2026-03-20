@@ -2676,23 +2676,29 @@ with tab_radar:
     if filtered.empty:
         st.info("No signals match the current filters.")
     else:
-        # Per-row preview score (used for sorting — must match displayed card score)
+        # Per-row preview score (used for sorting — mirrors the card's top-stock score)
         def _preview_score(row):
-            syms = get_stock_trade_symbols(row)
-            sym0 = syms[1][0] if syms[1] else ""
-            ws   = compute_weather_strength(row)
-            mq   = compute_mapping_quality(row, sym0, syms[0]) if sym0 else 0.0
-            eq   = compute_execution_quality(row, sym0) if sym0 else 0.0
-            ss   = compute_seasonality_score(row)
-            tf   = compute_trend_factor(row)
-            es   = compute_edge_score(row)
+            trade, symbols = get_stock_trade_symbols(row)
+            if not symbols:
+                return 0.0
+            ws  = compute_weather_strength(row)
+            ss  = compute_seasonality_score(row)
+            tf  = compute_trend_factor(row)
+            es  = compute_edge_score(row)
             pheno_mult, _ = compute_phenological_multiplier(row)
-            # Include confluence bonus so sort order matches displayed card score
             anomaly_key = normalize_anomaly_key(str(row.get("anomaly_type", "")))
-            cb   = compute_confluence_bonus(filtered, anomaly_key)
-            return compute_final_trade_score(ws, mq, 10.0, eq, ss, tf,
-                                             confluence_bonus=cb, edge_score=es,
-                                             pheno_multiplier=pheno_mult)
+            cb  = compute_confluence_bonus(filtered, anomaly_key)
+            # Evaluate all symbols (cap at 5) and return the best — same as card logic
+            best = 0.0
+            for sym in symbols[:5]:
+                mq = compute_mapping_quality(row, sym, trade)
+                eq = compute_execution_quality(row, sym)
+                s  = compute_final_trade_score(ws, mq, 10.0, eq, ss, tf,
+                                               confluence_bonus=cb, edge_score=es,
+                                               pheno_multiplier=pheno_mult)
+                if s > best:
+                    best = s
+            return best
 
         top_df = filtered.copy()
         top_df["preview_score"] = top_df.apply(_preview_score, axis=1)
