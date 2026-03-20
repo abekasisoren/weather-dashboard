@@ -915,6 +915,7 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
         seasonality_score = compute_seasonality_score(row)
         trend_factor = compute_trend_factor(row)
         edge_score = compute_edge_score(row)
+        sigma_score = compute_anomaly_zscore(row)
 
         for symbol in symbols:
             mapping_quality = compute_mapping_quality(row, symbol, trade)
@@ -934,6 +935,7 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
                     "Seasonality": seasonality_score,
                     "Trend Factor": trend_factor,
                     "Edge Score": edge_score,
+                    "Sigma Score": sigma_score,
                     "Trend Direction": normalize_text(row.get("trend_direction", ""), "new"),
                     "Anomaly Type": normalize_anomaly_key(row.get("anomaly_type", "")),
                     "Why": get_why_it_matters(row),
@@ -1044,6 +1046,8 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
                 "Trend Factor": round(trend_factor, 2),
                 "Edge Score": round(edge_score, 2),
                 "Confluence Bonus": round(conf_bonus, 2),
+                "Sigma Score": round(float(winner.get("Sigma Score", 1.0)), 3),
+                "Pheno Mult": round(pheno_mult_pulse, 3),
                 "Long Raw": long_score,
                 "Short Raw": short_score,
             }
@@ -3070,9 +3074,10 @@ with tab_aftermath:
         st.markdown("---")
         st.subheader("🤖 ML Trade Scorer")
         st.caption(
-            "Trains an XGBoost model on your logged trade outcomes to learn which "
-            "weather/region/anomaly combinations actually win. Improves as your "
-            "track record grows."
+            "Trains an XGBoost model on **confirmed T+3 outcomes only** (never same-day noise). "
+            "Features: region, anomaly, conviction, Z-score (σ), seasonality surprise, "
+            "confluence bonus, phenological multiplier, trend direction. "
+            "Stored in PostgreSQL — survives deploys. Improves as your track record grows."
         )
 
         try:
@@ -3082,21 +3087,23 @@ with tab_aftermath:
             )
 
             labeled_df = get_labeled_data(aftermath_df)
-            n_labeled = len(labeled_df)
-            info = model_info()
+            n_labeled  = len(labeled_df)
+            info       = model_info()
 
-            ml_c1, ml_c2, ml_c3, ml_c4 = st.columns(4)
-            ml_c1.metric("Labeled Trades", n_labeled)
+            ml_c1, ml_c2, ml_c3, ml_c4, ml_c5 = st.columns(5)
+            ml_c1.metric("T+3 Labeled",    n_labeled,
+                         help="Trades with confirmed 3-day outcome — the training set")
             ml_c2.metric("Needed to Train", MIN_SAMPLES)
-            ml_c3.metric("Model", "✅ Ready" if info["trained"] else "⏳ Not trained")
+            ml_c3.metric("Model",   "✅ Ready" if info["trained"] else "⏳ Not trained")
+            ml_c4.metric("Storage", "🗄️ DB" if os.environ.get("DATABASE_URL") else "📁 Local")
             if info["trained"]:
-                ml_c4.metric("Trained on", f"{info['n_trained']} trades")
+                ml_c5.metric("Trained on", f"{info['n_trained']} trades")
 
             if n_labeled < MIN_SAMPLES:
                 st.info(
-                    f"Need **{MIN_SAMPLES - n_labeled} more** labeled trade outcomes. "
-                    "Once Finnhub is connected, fetch quotes daily — P&L data "
-                    "accumulates automatically."
+                    f"Need **{MIN_SAMPLES - n_labeled} more** trades with confirmed T+3 outcomes. "
+                    "Log recommendations daily — after 3 business days each trade automatically "
+                    "gets its T+3 snapshot via Yahoo Finance historical data."
                 )
             else:
                 if st.button("🔄 Train / Retrain ML Model", type="primary"):
