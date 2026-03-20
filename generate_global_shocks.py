@@ -235,6 +235,104 @@ REGIONS = [
         "lon_max": -75.0,
         "commodities": ["Coffee", "Sugar"],
     },
+    # ── Asia-Pacific expansion ──────────────────────────────────────────────
+    {
+        "name": "Japan + Korean Peninsula",
+        "lat_min": 30.0,
+        "lat_max": 45.0,
+        "lon_min": 126.0,
+        "lon_max": 142.0,
+        "commodities": ["LNG", "Automotive", "Semiconductors"],
+    },
+    {
+        "name": "Taiwan + Western Pacific",
+        "lat_min": 21.0,
+        "lat_max": 26.0,
+        "lon_min": 119.0,
+        "lon_max": 123.0,
+        "commodities": ["Semiconductors"],
+    },
+    {
+        "name": "Northeast China",
+        "lat_min": 42.0,
+        "lat_max": 50.0,
+        "lon_min": 120.0,
+        "lon_max": 132.0,
+        "commodities": ["Soybeans", "Corn"],
+    },
+    {
+        "name": "Indonesia",
+        "lat_min": -8.0,
+        "lat_max": 5.0,
+        "lon_min": 95.0,
+        "lon_max": 116.0,
+        "commodities": ["Palm Oil", "Coal"],
+    },
+    {
+        "name": "Bangladesh + Bay of Bengal",
+        "lat_min": 20.0,
+        "lat_max": 26.0,
+        "lon_min": 88.0,
+        "lon_max": 92.0,
+        "commodities": ["Garments", "Rice"],
+    },
+    {
+        "name": "Kazakhstan + Central Asia",
+        "lat_min": 42.0,
+        "lat_max": 55.0,
+        "lon_min": 55.0,
+        "lon_max": 80.0,
+        "commodities": ["Wheat"],
+    },
+    # ── Global high-signal additions ────────────────────────────────────────
+    {
+        "name": "Western Australia",
+        "lat_min": -35.0,
+        "lat_max": -20.0,
+        "lon_min": 114.0,
+        "lon_max": 122.0,
+        "commodities": ["Iron Ore", "Lithium", "Copper"],
+    },
+    {
+        "name": "Panama Canal Watershed",
+        "lat_min": 8.0,
+        "lat_max": 10.0,
+        "lon_min": -81.0,
+        "lon_max": -79.0,
+        "commodities": ["Shipping"],
+    },
+    {
+        "name": "Morocco + Northwest Africa",
+        "lat_min": 28.0,
+        "lat_max": 36.0,
+        "lon_min": -12.0,
+        "lon_max": 3.0,
+        "commodities": ["Phosphate", "Wheat"],
+    },
+    {
+        "name": "Caribbean Basin",
+        "lat_min": 12.0,
+        "lat_max": 24.0,
+        "lon_min": -85.0,
+        "lon_max": -60.0,
+        "commodities": ["Oil", "Natural Gas"],
+    },
+    {
+        "name": "Texas + Permian Basin",
+        "lat_min": 28.0,
+        "lat_max": 33.0,
+        "lon_min": -104.0,
+        "lon_max": -94.0,
+        "commodities": ["Oil", "Natural Gas"],
+    },
+    {
+        "name": "South Africa",
+        "lat_min": -30.0,
+        "lat_max": -22.0,
+        "lon_min": 25.0,
+        "lon_max": 32.0,
+        "commodities": ["Platinum", "Coal"],
+    },
 ]
 
 MARKET_SENSITIVITY = {
@@ -261,6 +359,14 @@ MARKET_SENSITIVITY = {
     "Lithium": 5,
     "Dairy": 3,
     "Cattle": 3,
+    # Asia-Pacific + global expansion commodities
+    "Semiconductors": 5,   # TSMC fabs — typhoon/cold disruption is massive
+    "Automotive":     4,   # Japan/Korea supply chain
+    "Garments":       4,   # Bangladesh supply chain — flood/cyclone = PVH/HBI short
+    "Iron Ore":       5,   # Western Australia cyclone → Port Hedland closure
+    "Shipping":       4,   # Panama Canal drought → restricted transits → rate spike
+    "Phosphate":      4,   # Morocco drought → global fertilizer supply crunch
+    "Platinum":       4,   # South Africa drought → Eskom power rationing → mine cuts
 }
 
 RULES = {
@@ -269,27 +375,28 @@ RULES = {
         "severity_step_c": 2.0,
         "base_score": 3,
         "bullish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar", "Natural Gas", "Power Utilities",
-                        "Sunflower Oil", "Copper", "Dairy", "Cattle"},
+                        "Sunflower Oil", "Copper", "Dairy", "Cattle", "Iron Ore", "Platinum"},
     },
     "extreme_heat": {
         "temp_c_max": 40.0,
         "severity_step_c": 2.0,
         "base_score": 4,
         "bullish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar", "Natural Gas", "Power Utilities",
-                        "Sunflower Oil", "Copper", "Dairy", "Cattle"},
+                        "Sunflower Oil", "Copper", "Dairy", "Cattle", "Iron Ore", "Platinum",
+                        "Semiconductors"},
     },
     "frost": {
         "temp_c_min": 0.0,
         "severity_step_c": 2.0,
         "base_score": 4,
         "bullish_for": {"Coffee", "Sugar", "Wheat", "Natural Gas", "Power Utilities",
-                        "Sunflower Oil", "Dairy"},
+                        "Sunflower Oil", "Dairy", "Automotive", "Semiconductors"},
     },
     "heavy_rain": {
         "precip_mm_7d": 100.0,
         "severity_step_mm": 25.0,
         "base_score": 3,
-        "bullish_for": {"Natural Gas", "Power Utilities", "Hydropower"},
+        "bullish_for": {"Natural Gas", "Power Utilities", "Hydropower", "Garments"},
         "bearish_for": {"Wheat", "Corn", "Soybeans", "Coffee", "Sugar", "Sunflower Oil"},
     },
     "drought": {
@@ -298,20 +405,22 @@ RULES = {
         "severity_step_mm": 5.0,
         "base_score": 4,
         "bullish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar",
-                        "Sunflower Oil", "Copper", "Lithium", "Dairy", "Cattle"},
+                        "Sunflower Oil", "Copper", "Lithium", "Dairy", "Cattle",
+                        "Shipping", "Phosphate", "Iron Ore", "Platinum"},
         "bearish_for": {"Hydropower"},
     },
     "storm_wind": {
         "wind_ms_max": 18.0,
         "severity_step_ms": 3.0,
         "base_score": 3,
-        "bullish_for": {"Natural Gas", "Power Utilities", "Coal", "Oil"},
+        "bullish_for": {"Natural Gas", "Power Utilities", "Coal", "Oil",
+                        "Shipping", "Iron Ore"},
     },
     "flood_risk": {
         "precip_mm_7d": 140.0,
         "severity_step_mm": 30.0,
         "base_score": 4,
-        "bullish_for": {"Power Utilities", "Oil", "Natural Gas", "Hydropower"},
+        "bullish_for": {"Power Utilities", "Oil", "Natural Gas", "Hydropower", "Garments"},
         "bearish_for": {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar", "Sunflower Oil"},
     },
     "wildfire_risk": {
@@ -326,14 +435,16 @@ RULES = {
         "temp_c_min": -5.0,
         "severity_step_c": 3.0,
         "base_score": 4,
-        "bullish_for": {"Natural Gas", "Power Utilities", "Wheat", "Dairy"},
+        "bullish_for": {"Natural Gas", "Power Utilities", "Wheat", "Dairy",
+                        "Automotive", "Semiconductors"},
     },
     "hurricane_risk": {
         "wind_ms_max": 25.0,
         "precip_mm_7d": 120.0,
         "severity_step_ms": 5.0,
         "base_score": 5,
-        "bullish_for": {"Oil", "Natural Gas", "Power Utilities"},
+        "bullish_for": {"Oil", "Natural Gas", "Power Utilities",
+                        "Iron Ore", "Semiconductors", "Automotive", "Garments"},
     },
     # --- New anomaly types ---
     "polar_vortex": {
@@ -355,7 +466,8 @@ RULES = {
         "precip_mm_7d_max": 5.0,
         "severity_step_mm": 2.0,
         "base_score": 5,
-        "bullish_for": {"Rice", "Sugar", "Palm Oil", "Coffee"},
+        "bullish_for": {"Rice", "Sugar", "Palm Oil", "Coffee",
+                        "Garments", "Semiconductors", "Automotive"},
         "bearish_for": set(),
     },
     "ice_storm": {
@@ -370,7 +482,8 @@ RULES = {
         "wind_ms_max": 30.0,
         "severity_step_ms": 5.0,
         "base_score": 4,
-        "bullish_for": {"Oil", "Natural Gas", "LNG"},
+        "bullish_for": {"Oil", "Natural Gas", "LNG",
+                        "Iron Ore", "Semiconductors", "Automotive", "Shipping"},
         "bearish_for": set(),
     },
 }
@@ -482,6 +595,42 @@ ASSET_MAP = {
         "best_vehicle": "COW",
         "proxy_equities": ["TSN", "PPC", "WH"],
         "secondary_exposures": ["meatpacking", "food manufacturers", "feedlots"],
+    },
+    # Asia-Pacific + global expansion
+    "Semiconductors": {
+        "best_vehicle": "SMH",
+        "proxy_equities": ["TSM", "AMAT", "KLAC", "LRCX"],
+        "secondary_exposures": ["fab equipment", "chip design", "memory", "foundry services"],
+    },
+    "Automotive": {
+        "best_vehicle": "CARZ",
+        "proxy_equities": ["TM", "HMC", "F", "GM"],
+        "secondary_exposures": ["auto parts", "supply chain logistics", "car dealers"],
+    },
+    "Garments": {
+        "best_vehicle": "XRT",
+        "proxy_equities": ["PVH", "HBI", "VFC", "RL"],
+        "secondary_exposures": ["apparel brands", "fast fashion", "retail supply chain"],
+    },
+    "Iron Ore": {
+        "best_vehicle": "PICK",
+        "proxy_equities": ["BHP", "RIO", "CLF", "MT"],
+        "secondary_exposures": ["steel mills", "bulk shipping", "Port Hedland"],
+    },
+    "Shipping": {
+        "best_vehicle": "BDRY",
+        "proxy_equities": ["GOGL", "DSX", "ZIM", "DAC"],
+        "secondary_exposures": ["dry bulk", "tankers", "container shipping", "canal transit"],
+    },
+    "Phosphate": {
+        "best_vehicle": "MOO",
+        "proxy_equities": ["MOS", "NTR", "CF"],
+        "secondary_exposures": ["fertilizer", "crop inputs", "Morocco mining"],
+    },
+    "Platinum": {
+        "best_vehicle": "PPLT",
+        "proxy_equities": ["SBSW", "IMPUY", "ANGPY"],
+        "secondary_exposures": ["palladium", "South Africa mining", "catalytic converters"],
     },
 }
 

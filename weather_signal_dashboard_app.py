@@ -2676,17 +2676,19 @@ with tab_radar:
     if filtered.empty:
         st.info("No signals match the current filters.")
     else:
-        # Per-row preview score (used only for sorting within a group)
+        # Per-row preview score (used for sorting — must match displayed card score)
         def _preview_score(row):
             syms = get_stock_trade_symbols(row)
             sym0 = syms[1][0] if syms[1] else ""
-            ws = compute_weather_strength(row)
-            mq = compute_mapping_quality(row, sym0, syms[0]) if sym0 else 0.0
-            eq = compute_execution_quality(row, sym0) if sym0 else 0.0
-            ss = compute_seasonality_score(row)
-            tf = compute_trend_factor(row)
-            es = compute_edge_score(row)
-            return compute_final_trade_score(ws, mq, 10.0, eq, ss, tf, edge_score=es)
+            ws   = compute_weather_strength(row)
+            mq   = compute_mapping_quality(row, sym0, syms[0]) if sym0 else 0.0
+            eq   = compute_execution_quality(row, sym0) if sym0 else 0.0
+            ss   = compute_seasonality_score(row)
+            tf   = compute_trend_factor(row)
+            es   = compute_edge_score(row)
+            pheno_mult, _ = compute_phenological_multiplier(row)
+            return compute_final_trade_score(ws, mq, 10.0, eq, ss, tf, edge_score=es,
+                                             pheno_multiplier=pheno_mult)
 
         top_df = filtered.copy()
         top_df["preview_score"] = top_df.apply(_preview_score, axis=1)
