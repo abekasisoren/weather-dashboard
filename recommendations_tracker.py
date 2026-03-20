@@ -44,13 +44,20 @@ CREATE TABLE IF NOT EXISTS recommendations_log (
 );
 """
 
-# Columns added in the T+3/T+5 upgrade — safe to run multiple times
+# Schema migrations — safe to run multiple times (ADD COLUMN IF NOT EXISTS)
 _MIGRATE_STMTS = [
-    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_entry  DOUBLE PRECISION",
-    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS price_t3   DOUBLE PRECISION",
-    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS price_t5   DOUBLE PRECISION",
-    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_t3     DOUBLE PRECISION",
-    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_t5     DOUBLE PRECISION",
+    # T+3/T+5 snapshot columns
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_entry      DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS price_t3       DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS price_t5       DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_t3         DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_t5         DOUBLE PRECISION",
+    # ML feature snapshot columns — values captured at logging time
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS sigma_score     FLOAT",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS seasonality_sc  FLOAT",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS trend_dir       TEXT",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS confluence_bonus FLOAT",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS pheno_mult      FLOAT",
 ]
 
 
@@ -318,17 +325,23 @@ def log_recommendations(pulse_df: pd.DataFrame) -> int:
             continue
 
         rows_to_insert.append({
-            "signal_date":       row.get("Date", today),
-            "stock_symbol":      symbol,
-            "trade":             trade,
-            "entry_price":       prices.get(symbol),
-            "spy_entry":         spy_entry,
-            "region":            str(row.get("Region", "")),
-            "anomaly":           str(row.get("Anomaly", "")),
-            "commodity":         str(row.get("Commodity", "")),
-            "final_trade_score": float(row.get("Final Trade Score", 0)),
-            "conviction":        str(row.get("Conviction", "")),
-            "why_it_matters":    str(row.get("Why It Matters", ""))[:500],
+            "signal_date":        row.get("Date", today),
+            "stock_symbol":       symbol,
+            "trade":              trade,
+            "entry_price":        prices.get(symbol),
+            "spy_entry":          spy_entry,
+            "region":             str(row.get("Region", "")),
+            "anomaly":            str(row.get("Anomaly", "")),
+            "commodity":          str(row.get("Commodity", "")),
+            "final_trade_score":  float(row.get("Final Trade Score", 0)),
+            "conviction":         str(row.get("Conviction", "")),
+            "why_it_matters":     str(row.get("Why It Matters", ""))[:500],
+            # ML feature snapshot — captured at logging time
+            "sigma_score":        float(row.get("Sigma Score", 1.0)),
+            "seasonality_sc":     float(row.get("Seasonality", 5.0)),
+            "trend_dir":          str(row.get("Trend", "new")),
+            "confluence_bonus":   float(row.get("Confluence Bonus", 0.0)),
+            "pheno_mult":         float(row.get("Pheno Mult", 1.0)),
         })
 
     if not rows_to_insert:
@@ -342,12 +355,16 @@ def log_recommendations(pulse_df: pd.DataFrame) -> int:
                     INSERT INTO recommendations_log
                         (signal_date, stock_symbol, trade, entry_price, spy_entry,
                          region, anomaly, commodity, final_trade_score,
-                         conviction, why_it_matters)
+                         conviction, why_it_matters,
+                         sigma_score, seasonality_sc, trend_dir,
+                         confluence_bonus, pheno_mult)
                     VALUES (%(signal_date)s, %(stock_symbol)s, %(trade)s,
                             %(entry_price)s, %(spy_entry)s,
                             %(region)s, %(anomaly)s,
                             %(commodity)s, %(final_trade_score)s,
-                            %(conviction)s, %(why_it_matters)s)
+                            %(conviction)s, %(why_it_matters)s,
+                            %(sigma_score)s, %(seasonality_sc)s, %(trend_dir)s,
+                            %(confluence_bonus)s, %(pheno_mult)s)
                     """,
                     r,
                 )
@@ -408,7 +425,9 @@ def get_aftermath_table() -> pd.DataFrame:
                 SELECT id, logged_at, signal_date, stock_symbol, trade,
                        entry_price, spy_entry, region, anomaly, commodity,
                        final_trade_score, conviction, why_it_matters,
-                       price_t3, price_t5, spy_t3, spy_t5
+                       price_t3, price_t5, spy_t3, spy_t5,
+                       sigma_score, seasonality_sc, trend_dir,
+                       confluence_bonus, pheno_mult
                 FROM recommendations_log
                 ORDER BY logged_at DESC
                 """
@@ -521,6 +540,12 @@ def get_aftermath_table() -> pd.DataFrame:
         "_pnl_t5_raw":   df["pnl_t5"],
         "_alpha_t3_raw": df["alpha_t3"],
         "_alpha_t5_raw": df["alpha_t5"],
+        # ML feature snapshot columns
+        "_sigma":      df["sigma_score"] if "sigma_score" in df.columns else pd.Series(1.0, index=df.index),
+        "_seasonality": df["seasonality_sc"] if "seasonality_sc" in df.columns else pd.Series(5.0, index=df.index),
+        "_trend_dir":  df["trend_dir"] if "trend_dir" in df.columns else pd.Series("new", index=df.index),
+        "_confluence": df["confluence_bonus"] if "confluence_bonus" in df.columns else pd.Series(0.0, index=df.index),
+        "_pheno_mult": df["pheno_mult"] if "pheno_mult" in df.columns else pd.Series(1.0, index=df.index),
     })
 
     return display
