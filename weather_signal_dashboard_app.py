@@ -2687,7 +2687,11 @@ with tab_radar:
             tf   = compute_trend_factor(row)
             es   = compute_edge_score(row)
             pheno_mult, _ = compute_phenological_multiplier(row)
-            return compute_final_trade_score(ws, mq, 10.0, eq, ss, tf, edge_score=es,
+            # Include confluence bonus so sort order matches displayed card score
+            anomaly_key = normalize_anomaly_key(str(row.get("anomaly_type", "")))
+            cb   = compute_confluence_bonus(filtered, anomaly_key)
+            return compute_final_trade_score(ws, mq, 10.0, eq, ss, tf,
+                                             confluence_bonus=cb, edge_score=es,
                                              pheno_multiplier=pheno_mult)
 
         top_df = filtered.copy()
