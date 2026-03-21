@@ -2805,6 +2805,53 @@ with tab_radar:
         for _sym, ei in symbol_event_owner.items():
             event_owned_symbols[ei].add(_sym)
 
+        # ── Re-sort by effective displayed score (owned symbols only) ──────────
+        # After ownership assignment, an event's best symbol may have been
+        # claimed by a higher-scoring event. The card displays only owned symbols,
+        # so the sort order must reflect that — otherwise card #1 can show a
+        # lower score than card #2.
+        def _owned_event_score(grp: "pd.DataFrame", owned: set) -> float:
+            if not owned:
+                return 0.0
+            best = 0.0
+            for _, _row in grp.iterrows():
+                _trade, _syms = get_stock_trade_symbols(_row)
+                _ws  = compute_weather_strength(_row)
+                _ss  = compute_seasonality_score(_row)
+                _tf  = compute_trend_factor(_row)
+                _es  = compute_edge_score(_row)
+                _pm, _ = compute_phenological_multiplier(_row)
+                _ak  = normalize_anomaly_key(str(_row.get("anomaly_type", "")))
+                _cb  = compute_confluence_bonus(filtered, _ak)
+                for _sym in _syms[:5]:
+                    if _sym not in owned:
+                        continue
+                    _mq = compute_mapping_quality(_row, _sym, _trade)
+                    _eq = compute_execution_quality(_row, _sym)
+                    _s  = compute_final_trade_score(_ws, _mq, 10.0, _eq, _ss, _tf,
+                                                    confluence_bonus=_cb, edge_score=_es,
+                                                    pheno_multiplier=_pm)
+                    if _s > best:
+                        best = _s
+            return best
+
+        event_groups = [
+            (_owned_event_score(grp, event_owned_symbols[ei]), grp)
+            for ei, (_, grp) in enumerate(event_groups)
+        ]
+        event_groups.sort(key=lambda x: x[0], reverse=True)
+        # Re-assign owned symbols after re-sort (indices changed)
+        symbol_event_owner2: dict[str, int] = {}
+        for ei2, (es2, grp2) in enumerate(event_groups):
+            for _, _row2 in grp2.iterrows():
+                _, syms2 = get_stock_trade_symbols(_row2)
+                for _sym2 in syms2:
+                    if _sym2 not in symbol_event_owner2 or es2 > event_groups[symbol_event_owner2[_sym2]][0]:
+                        symbol_event_owner2[_sym2] = ei2
+        event_owned_symbols = [set() for _ in event_groups]
+        for _sym2, ei2 in symbol_event_owner2.items():
+            event_owned_symbols[ei2].add(_sym2)
+
         # ── Load 24h cooldown combos (cached in session to avoid repeated DB hits) ──
         if "cooldown_combos" not in st.session_state:
             try:
