@@ -409,8 +409,15 @@ class MediaValidator:
 def write_validation_to_db(conn, signal_id: int, summary: ValidationSummary) -> None:
     """
     Persist media validation to weather_global_shocks.
+
+    Updates ALL rows for the same (region, anomaly_type) in the last 14 days —
+    not just the single row by ID. This ensures that new rows inserted by
+    subsequent GRIB runs (which get fresh IDs) also carry the media confirmation,
+    so the Radar card always shows the EXIT SIGNAL regardless of which row is
+    selected as best_row.
+
     - media_pickup_at is set only once (COALESCE preserves original timestamp)
-    - media_article_url stores the best article link
+    - media_article_url is set only once (COALESCE keeps the first URL found)
     """
     best = summary.best_result
     if best is None:
@@ -421,21 +428,24 @@ def write_validation_to_db(conn, signal_id: int, summary: ValidationSummary) -> 
             """
             UPDATE weather_global_shocks
             SET
-                media_validated   = %s,
+                media_validated   = TRUE,
                 media_source      = %s,
                 media_headline    = %s,
                 media_score       = %s,
                 media_pickup_at   = COALESCE(media_pickup_at, NOW()),
                 media_article_url = COALESCE(media_article_url, %s)
-            WHERE id = %s
+            WHERE
+                region       = %s
+                AND anomaly_type = %s
+                AND created_at  >= NOW() - INTERVAL '14 days'
             """,
             (
-                True,
                 best.source,
                 best.headline[:500] if best.headline else None,
                 best.score,
                 best.url or None,
-                signal_id,
+                summary.region,
+                summary.anomaly,
             ),
         )
         conn.commit()
