@@ -2795,14 +2795,21 @@ with tab_radar:
                               "media_headline", "media_source", "media_pickup_at"]
                 _avail = [c for c in _show_cols if c in _confirmed_rows.columns]
 
-                # Format pickup time
+                # Format pickup time — guard against NaT and None
                 if "media_pickup_at" in _confirmed_rows.columns:
-                    _confirmed_rows["media_pickup_at"] = _confirmed_rows["media_pickup_at"].apply(
-                        lambda ts: (
-                            ts.strftime("%b %d %Y %H:%M UTC")
-                            if hasattr(ts, "strftime") else str(ts)[:16]
-                        ) if ts is not None else ""
-                    )
+                    def _fmt_hidden_ts(ts):
+                        if ts is None:
+                            return ""
+                        try:
+                            if pd.isna(ts):
+                                return ""
+                        except Exception:
+                            pass
+                        try:
+                            return pd.Timestamp(ts).strftime("%b %d %Y %H:%M UTC")
+                        except Exception:
+                            return str(ts)[:16]
+                    _confirmed_rows["media_pickup_at"] = _confirmed_rows["media_pickup_at"].apply(_fmt_hidden_ts)
                 st.dataframe(_confirmed_rows[_avail], use_container_width=True)
                 st.caption(
                     "These events have been picked up by media — the trade thesis is now public. "
