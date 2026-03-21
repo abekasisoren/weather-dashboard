@@ -2673,6 +2673,14 @@ selected_trades = st.sidebar.multiselect("Trade", trade_options, default=trade_o
 trend_options = ["worsening", "new", "stable", "recovering"]
 selected_trends = st.sidebar.multiselect("Trend Direction", trend_options, default=["worsening", "new", "stable"])
 
+# Media-confirmed events are in the EXIT window — hide by default
+hide_confirmed = st.sidebar.checkbox(
+    "🚪 Hide media-confirmed events",
+    value=True,
+    help="When checked, events already confirmed by media (EXIT window open) are removed "
+         "from the Radar and Pulse Trader. The alpha window is closed once media picks it up.",
+)
+
 region_options = sorted(df["region"].dropna().astype(str).unique().tolist())
 selected_regions = st.sidebar.multiselect("Region", region_options, default=region_options)
 
@@ -2695,6 +2703,13 @@ filtered = df[
     & df["trend_direction"].astype(str).isin(selected_trends)
     & (df["weather_strength"] >= min_signal)
 ].copy()
+
+# ── Exclude media-confirmed events (EXIT window open — alpha gone) ─────────
+_n_confirmed_hidden = 0
+if hide_confirmed and "media_validated" in filtered.columns:
+    _confirmed_mask = filtered["media_validated"] == True
+    _n_confirmed_hidden = filtered[_confirmed_mask]["region"].nunique()  # unique events hidden
+    filtered = filtered[~_confirmed_mask].copy()
 
 filtered_ranked = build_ranked_trade_table(filtered)
 valid_bucket_keys = set(selected_buckets)
@@ -2734,6 +2749,15 @@ with tab_radar:
     k2.metric("New Today",      new_count)
     k3.metric("↑ Worsening",    worsening_count)
     k4.metric("Last Update",    format_dt(last_update)[:16] if last_update else "—")
+
+    if hide_confirmed and _n_confirmed_hidden > 0:
+        st.info(
+            f"🚪 **{_n_confirmed_hidden} media-confirmed event(s) hidden** — EXIT window open, "
+            f"alpha gone. View them in the Media Signals tab or uncheck "
+            f"'Hide media-confirmed events' in the sidebar.",
+            icon=None,
+        )
+
     st.divider()
 
     # ── Weather-event card grid ────────────────────────────────────────────────
