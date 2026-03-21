@@ -3256,35 +3256,40 @@ with tab_aftermath:
         # ── Performance metrics ───────────────────────────────────────────────
         perf = get_performance_summary(aftermath_df)
         if perf:
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Total Logged", perf["total"])
-            m2.metric("Win Rate",     f"{perf['win_rate']}%",
-                      help="Based on best available P&L (T+10 > T+7 > T+5 > T+3 > Day 0)")
-            m3.metric("Avg P&L",      f"{perf['avg_pnl']:+.2f}%")
-            m4.metric("Best Trade",   perf["best_trade"])
-            m5.metric("Worst Trade",  perf["worst_trade"])
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            m1.metric("Total Logged",   perf["total"])
+            m2.metric("🚪 Closed",      perf.get("closed_count", 0),
+                      help="Positions auto-closed when media confirmed the weather event")
+            m3.metric("Win Rate",       f"{perf['win_rate']}%",
+                      help="Based on best available P&L (Exit > T+10 > T+7 > T+5 > T+3 > Day 0)")
+            m4.metric("Avg P&L",        f"{perf['avg_pnl']:+.2f}%")
+            m5.metric("Best Trade",     perf["best_trade"])
+            m6.metric("Worst Trade",    perf["worst_trade"])
 
-            e1, e2, e3, e4 = st.columns(4)
-            e1.metric("T+3 Evaluated",  perf.get("t3_evaluated",  0),
+            e1, e2, e3, e4, e5 = st.columns(5)
+            e1.metric("🚪 Exit Evaluated", perf.get("exit_evaluated", 0),
+                      help="Positions with actual exit price at media confirmation date")
+            e2.metric("T+3 Evaluated",  perf.get("t3_evaluated",  0),
                       help="Trades with a 3-business-day closing price snapshot")
-            e2.metric("T+5 Evaluated",  perf.get("t5_evaluated",  0),
+            e3.metric("T+5 Evaluated",  perf.get("t5_evaluated",  0),
                       help="Trades with a 5-business-day closing price snapshot")
-            e3.metric("T+7 Evaluated",  perf.get("t7_evaluated",  0),
+            e4.metric("T+7 Evaluated",  perf.get("t7_evaluated",  0),
                       help="Trades with a 7-business-day closing price snapshot")
-            e4.metric("T+10 Evaluated", perf.get("t10_evaluated", 0),
+            e5.metric("T+10 Evaluated", perf.get("t10_evaluated", 0),
                       help="Trades with a 10-business-day closing price snapshot (~2 weeks)")
 
         st.caption(
-            "📅 **Evaluation horizons**: T+3 (momentum), T+5 (follow-through), "
-            "T+7 (media pick-up), T+10 (~2 weeks, full weather repricing). "
-            "Outcome uses the latest available snapshot. Day 0 shown for reference only."
+            "📅 **Exit P&L** = actual close at media confirmation date (highest priority). "
+            "T+3/T+5/T+7/T+10 = theoretical horizons. "
+            "🚪 Closed positions were auto-exited when media confirmed the weather event."
         )
 
         st.divider()
 
         # ── Colour-coded P&L table ────────────────────────────────────────────
         display_cols = [
-            "Date Logged", "Stock", "Trade", "Entry",
+            "Date Logged", "Status", "Stock", "Trade", "Entry",
+            "Exit P&L", "Exit α SPY",        # actual close at media pickup
             "Day 0 P&L",
             "T+3 P&L",  "T+3 α SPY",
             "T+5 P&L",  "T+5 α SPY",
@@ -3296,17 +3301,20 @@ with tab_aftermath:
         visible = aftermath_df[[c for c in display_cols if c in aftermath_df.columns]].copy()
 
         # Filter controls
-        fc1, fc2, fc3 = st.columns(3)
+        fc1, fc2, fc3, fc4 = st.columns(4)
         trade_filter      = fc1.multiselect("Trade", ["Long", "Short"], default=["Long", "Short"])
         all_outcomes      = ["✅ Win", "❌ Loss", "➖ Flat", "⏳ Pending", "—"]
         outcome_filter    = fc2.multiselect("Outcome", all_outcomes, default=all_outcomes)
         conviction_vals   = sorted(aftermath_df["Conviction"].dropna().unique().tolist())
         conviction_filter = fc3.multiselect("Conviction", conviction_vals, default=conviction_vals)
+        all_statuses      = sorted(aftermath_df["Status"].dropna().unique().tolist()) if "Status" in aftermath_df.columns else []
+        status_filter     = fc4.multiselect("Status", all_statuses, default=all_statuses)
 
         visible = visible[
             visible["Trade"].isin(trade_filter) &
             visible["Outcome"].isin(outcome_filter) &
-            visible["Conviction"].isin(conviction_filter)
+            visible["Conviction"].isin(conviction_filter) &
+            (visible["Status"].isin(status_filter) if "Status" in visible.columns and status_filter else True)
         ]
 
         st.dataframe(visible, use_container_width=True, height=500)
