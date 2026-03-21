@@ -2705,10 +2705,38 @@ filtered = df[
 ].copy()
 
 # ── Exclude media-confirmed events (EXIT window open — alpha gone) ─────────
+# Region families: subregions and parent regions share the same weather event.
+# If "Brazil Center-South / heavy_rain" is confirmed, "Brazil / flood_risk"
+# is the same story and must also be hidden.
+_REGION_FAMILY: dict[str, frozenset] = {
+    "Brazil":               frozenset({"Brazil", "Brazil Center-South", "Mato Grosso"}),
+    "Brazil Center-South":  frozenset({"Brazil", "Brazil Center-South", "Mato Grosso"}),
+    "Mato Grosso":          frozenset({"Brazil", "Brazil Center-South", "Mato Grosso"}),
+    "US Midwest":           frozenset({"US Midwest", "US Southern Plains"}),
+    "US Southern Plains":   frozenset({"US Midwest", "US Southern Plains"}),
+    "Europe Gas Belt":      frozenset({"Europe Gas Belt", "Southern Europe", "North Sea"}),
+    "Southern Europe":      frozenset({"Europe Gas Belt", "Southern Europe", "North Sea"}),
+    "North Sea":            frozenset({"Europe Gas Belt", "Southern Europe", "North Sea"}),
+    "Australia East":       frozenset({"Australia East", "Western Australia"}),
+    "Western Australia":    frozenset({"Australia East", "Western Australia"}),
+    "Black Sea":            frozenset({"Black Sea", "Canadian Prairies"}),
+}
+
 _n_confirmed_hidden = 0
-if hide_confirmed and "media_validated" in filtered.columns:
-    _confirmed_mask = filtered["media_validated"] == True
-    _n_confirmed_hidden = filtered[_confirmed_mask]["region"].nunique()  # unique events hidden
+if hide_confirmed and "media_validated" in df.columns:
+    # Collect ALL confirmed regions from full df (not just filtered)
+    _confirmed_raw = set(
+        df.loc[df["media_validated"] == True, "region"].dropna().astype(str).unique()
+    )
+    # Expand each confirmed region to its full family
+    _confirmed_regions: set[str] = set()
+    for _r in _confirmed_raw:
+        _confirmed_regions.add(_r)
+        _confirmed_regions.update(_REGION_FAMILY.get(_r, frozenset()))
+
+    # Hide ALL anomaly types for confirmed region families
+    _confirmed_mask = filtered["region"].astype(str).isin(_confirmed_regions)
+    _n_confirmed_hidden = int(filtered[_confirmed_mask]["region"].nunique())
     filtered = filtered[~_confirmed_mask].copy()
 
 filtered_ranked = build_ranked_trade_table(filtered)
