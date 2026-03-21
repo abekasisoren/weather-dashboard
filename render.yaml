@@ -5,3 +5,22 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: bash start_dashboard.sh
+
+  # ── Media monitor — runs 4x daily to check news for active weather events ──
+  # When media picks up a weather event it marks it as confirmed in the DB,
+  # triggering the EXIT SIGNAL banner on the Radar card.
+  - type: cron
+    name: media-monitor
+    runtime: python
+    plan: free
+    schedule: "0 */6 * * *"   # 00:00, 06:00, 12:00, 18:00 UTC
+    buildCommand: pip install -r requirements.txt
+    startCommand: python media_validator.py
+    envVars:
+      - key: DATABASE_URL
+        fromService:
+          type: web
+          name: weather-dashboard
+          property: connectionString
+      - key: NEWSAPI_KEY
+        sync: false   # inherits from dashboard service env vars

@@ -2064,6 +2064,10 @@ def build_detailed_reasoning(
     bucket: str,
     all_df: "pd.DataFrame",
     accent: str = "#5DADE2",
+    media_article_url: str = "",
+    media_headline: str = "",
+    media_source: str = "",
+    media_pickup_ago: str = "",
 ) -> None:
     """Render detailed reasoning inside an st.expander — educational breakdown of every score component."""
     import datetime
@@ -2264,6 +2268,16 @@ def build_detailed_reasoning(
     # 7. Edge
     st.markdown("#### ⚡ Information Edge")
     st.markdown(edge_text)
+    # Article link — shown when media has confirmed this event
+    if media_article_url:
+        label = media_headline[:100] if media_headline else media_source or "Source"
+        timing = f" · {media_pickup_ago}" if media_pickup_ago else ""
+        st.markdown(
+            f"📰 **Media source{timing}:** [{label}]({media_article_url})",
+        )
+    elif media_source and not media_article_url:
+        timing = f" · {media_pickup_ago}" if media_pickup_ago else ""
+        st.caption(f"📰 Confirmed by {media_source}{timing} (no direct link stored)")
 
     # 8. Trade thesis
     if long_thesis or short_thesis:
@@ -2318,7 +2332,11 @@ def show_weather_event_card(
     anomaly_raw = normalize_text(best_row.get("anomaly_type", ""), "—")
     anomaly   = anomaly_raw.replace("_", " ").title()
     trend_dir = normalize_text(best_row.get("trend_direction", ""), "new")
-    media_val = best_row.get("media_validated")
+    media_val         = best_row.get("media_validated")
+    media_headline_val = best_row.get("media_headline", "") or ""
+    media_source_val   = best_row.get("media_source", "") or ""
+    media_article_url  = best_row.get("media_article_url", "") or ""
+    media_pickup_at    = best_row.get("media_pickup_at")
     region_raw  = normalize_text(best_row.get("region", ""), "").strip()
     anomaly_key_raw = anomaly_raw.strip()
 
@@ -2417,6 +2435,25 @@ def show_weather_event_card(
     rank_str     = f"#{rank_number}" if rank_number else ""
     media_str    = "&nbsp;&nbsp;📰 CONFIRMED" if media_val is True else ""
     score_pct    = min(int(event_score * 10), 100)
+
+    # ── Media pickup time-ago label ────────────────────────────────────────────
+    media_pickup_ago = ""
+    if media_val is True and media_pickup_at is not None:
+        try:
+            from datetime import timezone as _tz
+            if hasattr(media_pickup_at, "tzinfo") and media_pickup_at.tzinfo:
+                delta = datetime.now(_tz.utc) - media_pickup_at
+            else:
+                delta = datetime.utcnow() - media_pickup_at
+            hours = int(delta.total_seconds() / 3600)
+            if hours < 2:
+                media_pickup_ago = "just now"
+            elif hours < 24:
+                media_pickup_ago = f"{hours}h ago"
+            else:
+                media_pickup_ago = f"{hours // 24}d ago"
+        except Exception:
+            media_pickup_ago = ""
     commodities_str = "  ·  ".join(commodities)
 
     # Sigma badge — colour ramps from grey (1σ) to amber (2σ) to red (3σ)
@@ -2502,8 +2539,29 @@ def show_weather_event_card(
         f'<div style="background:{accent};width:{score_pct}%;height:2px;border-radius:3px;"></div></div>'
 
         f'<div style="font-size:9px;font-weight:700;color:#555;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;">AFFECTED MARKETS</div>'
-        + stock_rows_html +
-        f'</div>'
+        + stock_rows_html
+        + (
+            # ── EXIT SIGNAL banner — shown when media confirms the event ──────
+            f'<div style="margin-top:12px;padding:10px 12px;'
+            f'background:rgba(124,45,18,0.35);border-left:3px solid #f97316;border-radius:4px;">'
+            f'<div style="font-size:11px;font-weight:700;color:#fed7aa;letter-spacing:0.5px;margin-bottom:3px;">'
+            f'📰 MEDIA CONFIRMED — EXIT WINDOW OPEN</div>'
+            + (f'<div style="font-size:10px;color:#fdba74;margin-bottom:4px;">{media_headline_val[:120]}</div>'
+               if media_headline_val else "")
+            + (f'<a href="{media_article_url}" target="_blank" '
+               f'style="font-size:9px;color:#fb923c;text-decoration:none;">'
+               f'{media_source_val}'
+               + (f" · {media_pickup_ago}" if media_pickup_ago else "")
+               + f' → Read article</a>'
+               if media_article_url else
+               f'<span style="font-size:9px;color:#fb923c;">'
+               f'{media_source_val}'
+               + (f" · {media_pickup_ago}" if media_pickup_ago else "")
+               + f'</span>')
+            + f'</div>'
+            if media_val is True else ""
+        )
+        + f'</div>'
     )
     st.markdown(card_html, unsafe_allow_html=True)
 
@@ -2527,6 +2585,10 @@ def show_weather_event_card(
             bucket=bucket,
             all_df=all_df,
             accent=accent,
+            media_article_url=media_article_url,
+            media_headline=media_headline_val,
+            media_source=media_source_val,
+            media_pickup_ago=media_pickup_ago,
         )
 
 
@@ -2563,7 +2625,9 @@ df = read_sql(
         COALESCE(trend_direction, 'new') AS trend_direction,
         media_validated,
         media_source,
-        media_headline
+        media_headline,
+        media_pickup_at,
+        media_article_url
     FROM weather_global_shocks
     ORDER BY created_at DESC, signal_level DESC, region ASC, commodity ASC
 
