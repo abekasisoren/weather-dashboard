@@ -2813,16 +2813,21 @@ with tab_radar:
         def _owned_event_score(grp: "pd.DataFrame", owned: set) -> float:
             if not owned:
                 return 0.0
+            # Mirror show_weather_event_card exactly:
+            # shared weather-level metrics come from best_row (highest signal_level),
+            # while stock-level metrics (pheno_mult, mapping_quality, exec_quality)
+            # are computed per commodity row.
+            best_row_local = grp.sort_values("signal_level", ascending=False).iloc[0]
+            _ws  = compute_weather_strength(best_row_local)
+            _ss  = compute_seasonality_score(best_row_local)
+            _tf  = compute_trend_factor(best_row_local)
+            _es  = compute_edge_score(best_row_local)
+            _ak  = normalize_anomaly_key(str(best_row_local.get("anomaly_type", "")))
+            _cb  = compute_confluence_bonus(filtered, _ak)
             best = 0.0
             for _, _row in grp.iterrows():
                 _trade, _syms = get_stock_trade_symbols(_row)
-                _ws  = compute_weather_strength(_row)
-                _ss  = compute_seasonality_score(_row)
-                _tf  = compute_trend_factor(_row)
-                _es  = compute_edge_score(_row)
                 _pm, _ = compute_phenological_multiplier(_row)
-                _ak  = normalize_anomaly_key(str(_row.get("anomaly_type", "")))
-                _cb  = compute_confluence_bonus(filtered, _ak)
                 for _sym in _syms[:5]:
                     if _sym not in owned:
                         continue
