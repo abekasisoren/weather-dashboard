@@ -324,78 +324,94 @@ _CLOSE_ANOMALY_FAMILY: dict[str, frozenset] = {
 
 def close_positions_from_media() -> int:
     """
-    For any open recommendation whose underlying weather event has been confirmed
-    by media, mark the position as CLOSED at the media pickup date price.
+    For any open recommendation whose underlying weather event's REGION has been
+    confirmed by media, mark the position as CLOSED.
 
-    Uses REGION FAMILY + ANOMALY FAMILY matching so that e.g.
-    "Brazil Center-South / heavy_rain" confirmation closes
-    "Brazil / flood_risk" recommendations (same weather event, different grain).
+    Uses REGION FAMILY matching only: any confirmed anomaly in a region family closes
+    ALL recommendations for that entire region family — regardless of anomaly type.
+    This mirrors the Radar filter logic exactly.
 
-    Exit price: Yahoo Finance historical close on the media_pickup_at date.
+    Exit price: Yahoo Finance historical close on the media_pickup_at date (best effort).
+    If the price cannot be fetched (weekend / holiday / rate-limit), the position is
+    still marked Closed with exit_price = NULL — the UI will show "—" for that P&L.
+
     Sets: closed_at, exit_price, spy_exit_price, close_reason = 'media_confirmed'
-
     Returns number of positions newly closed.
     """
     if not DATABASE_URL:
         return 0
 
-    # ── Step 1: Fetch all confirmed weather events ─────────────────────────────
+    # ── Step 1: Fetch all confirmed regions with their earliest pickup date ─────
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT DISTINCT ON (region, anomaly_type)
-                        region, anomaly_type, media_pickup_at::date AS pickup_date
+                    SELECT region, MIN(media_pickup_at)::date AS pickup_date
                     FROM weather_global_shocks
                     WHERE media_validated = TRUE
                       AND media_pickup_at IS NOT NULL
-                    ORDER BY region, anomaly_type, media_pickup_at ASC
+                    GROUP BY region
                     """
                 )
-                confirmed_events = cur.fetchall()
-    except Exception:
+                confirmed_regions_raw = cur.fetchall()
+    except Exception as e:
+        print(f"[close_positions_from_media] DB error step 1: {e}")
         return 0
 
-    if not confirmed_events:
+    if not confirmed_regions_raw:
+        print("[close_positions_from_media] No media-confirmed regions found.")
         return 0
 
-    # ── Step 2: Expand each confirmed event to its region+anomaly families ─────
-    # Map: (frozenset of regions, frozenset of anomalies) → earliest pickup_date
-    family_buckets: dict[tuple, date] = {}
-    for region, anomaly_type, pickup_date in confirmed_events:
+    # ── Step 2: Expand each region to its family, keep earliest pickup date ─────
+    # confirmed_families: { frozenset(region_siblings) → earliest pickup_date }
+    confirmed_families: dict[frozenset, date] = {}
+    for region, pickup_date in confirmed_regions_raw:
         r_family = _CLOSE_REGION_FAMILY.get(region, frozenset({region}))
-        a_family = _CLOSE_ANOMALY_FAMILY.get(anomaly_type, frozenset({anomaly_type}))
-        key = (r_family, a_family)
-        if key not in family_buckets or pickup_date < family_buckets[key]:
-            family_buckets[key] = pickup_date
+        if r_family not in confirmed_families or pickup_date < confirmed_families[r_family]:
+            confirmed_families[r_family] = pickup_date
 
-    # ── Step 3: Find open recommendations matching any family bucket ───────────
+    print(
+        f"[close_positions_from_media] {len(confirmed_regions_raw)} confirmed region(s) "
+        f"→ {len(confirmed_families)} family group(s)"
+    )
+
+    # ── Step 3: Find open recommendations in confirmed region families ──────────
     to_close: list[tuple] = []  # (rec_id, symbol, trade, entry_p, spy_entry, pickup_date)
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
-                for (r_family, a_family), pickup_date in family_buckets.items():
+                for r_family, pickup_date in confirmed_families.items():
+                    region_list = sorted(r_family)
+                    print(
+                        f"[close_positions_from_media] Searching regions {region_list} "
+                        f"logged <= {pickup_date}"
+                    )
                     cur.execute(
                         """
                         SELECT id, stock_symbol, trade, entry_price, spy_entry
                         FROM recommendations_log
-                        WHERE region  = ANY(%s)
-                          AND anomaly = ANY(%s)
-                          AND closed_at IS NULL
+                        WHERE region     = ANY(%s)
+                          AND closed_at  IS NULL
                           AND logged_at::date <= %s
                         """,
-                        (list(r_family), list(a_family), pickup_date),
+                        (region_list, pickup_date),
                     )
-                    for row in cur.fetchall():
+                    rows = cur.fetchall()
+                    print(
+                        f"[close_positions_from_media]   → {len(rows)} open position(s) found"
+                    )
+                    for row in rows:
                         to_close.append((*row, pickup_date))
-    except Exception:
+    except Exception as e:
+        print(f"[close_positions_from_media] DB error step 3: {e}")
         return 0
 
     if not to_close:
+        print("[close_positions_from_media] Nothing to close.")
         return 0
 
-    # ── Step 4: Fetch Yahoo Finance prices at pickup date ─────────────────────
+    # ── Step 4: Fetch Yahoo Finance prices at pickup date (best effort) ─────────
     fetch_ranges: dict[str, tuple[date, date]] = {}
 
     def _ext(sym: str, d: date) -> None:
@@ -404,13 +420,15 @@ def close_positions_from_media() -> int:
 
     for rec_id, symbol, trade, entry_p, spy_entry, pickup_date in to_close:
         _ext(symbol, pickup_date)
-        _ext("SPY",  pickup_date)
+        _ext("SPY", pickup_date)
 
     histories: dict[str, dict[date, float]] = {}
     for sym, (lo, hi) in fetch_ranges.items():
         histories[sym] = _yahoo_history_range(sym, lo - timedelta(days=5), hi + timedelta(days=2))
 
-    # ── Step 5: Write exit price + close timestamp ─────────────────────────────
+    # ── Step 5: Write close record — always, even if exit price is unavailable ──
+    # The position MUST be marked closed regardless of price availability.
+    # If price is None, exit_price stays NULL and P&L will display "—".
     closed_count = 0
     try:
         with psycopg.connect(DATABASE_URL) as conn:
@@ -418,8 +436,6 @@ def close_positions_from_media() -> int:
                 for rec_id, symbol, trade, entry_p, spy_entry, pickup_date in to_close:
                     exit_p   = _closest_price_on_or_before(histories.get(symbol, {}), pickup_date)
                     spy_exit = _closest_price_on_or_before(histories.get("SPY",   {}), pickup_date)
-                    if exit_p is None:
-                        continue  # price data not yet available for that date
 
                     closed_ts = datetime.combine(pickup_date, datetime.min.time()).replace(
                         tzinfo=timezone.utc
@@ -435,11 +451,17 @@ def close_positions_from_media() -> int:
                         """,
                         (closed_ts, exit_p, spy_exit, rec_id),
                     )
+                    price_str = f"${exit_p:.2f}" if exit_p else "N/A (no price data)"
+                    print(
+                        f"[close_positions_from_media]   ✓ Closed rec #{rec_id} "
+                        f"{symbol} exit={price_str} pickup={pickup_date}"
+                    )
                     closed_count += 1
             conn.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[close_positions_from_media] DB error step 5: {e}")
 
+    print(f"[close_positions_from_media] Done — {closed_count} position(s) closed.")
     return closed_count
 
 
