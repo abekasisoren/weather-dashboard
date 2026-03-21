@@ -3063,7 +3063,23 @@ with tab_media:
     st.subheader("📰 Previously Confirmed (from DB)")
     if has_media_validated:
         media_df = df[df["media_validated"] == True].copy()
-        cols = ["region", "commodity", "anomaly_type", "signal_level", "trade_bias", "media_headline", "media_source"]
+
+        # Format media_pickup_at as a readable date string
+        if "media_pickup_at" in media_df.columns:
+            def _fmt_pickup(ts):
+                if ts is None or (hasattr(ts, "__class__") and ts.__class__.__name__ == "NaTType"):
+                    return ""
+                try:
+                    import datetime as _dt
+                    if hasattr(ts, "tzinfo"):
+                        ts = ts.replace(tzinfo=None)
+                    return ts.strftime("%b %d %Y, %H:%M UTC") if hasattr(ts, "strftime") else str(ts)[:16]
+                except Exception:
+                    return str(ts)[:16]
+            media_df["Picked Up"] = media_df["media_pickup_at"].apply(_fmt_pickup)
+
+        cols = ["region", "commodity", "anomaly_type", "signal_level", "trade_bias",
+                "Picked Up", "media_headline", "media_source"]
         st.dataframe(media_df[[c for c in cols if c in media_df.columns]], use_container_width=True)
     else:
         st.write("No DB-persisted confirmations yet.")
