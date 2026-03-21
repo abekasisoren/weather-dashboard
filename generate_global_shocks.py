@@ -679,7 +679,9 @@ def ensure_schema(conn) -> None:
             "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_validated BOOLEAN DEFAULT NULL",
             "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_source TEXT DEFAULT NULL",
             "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_headline TEXT DEFAULT NULL",
-            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_score FLOAT DEFAULT NULL",
+            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_score        FLOAT       DEFAULT NULL",
+            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_pickup_at   TIMESTAMPTZ DEFAULT NULL",
+            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_article_url  TEXT        DEFAULT NULL",
         ]
         for migration in migrations:
             cur.execute(migration)
