@@ -2865,62 +2865,91 @@ with tab_pulse:
 
 with tab_media:
     st.header("📡 Media Signal Validation")
-    st.caption("Cross-reference active weather signals against NOAA/NWS official alerts and NewsAPI headlines.")
+    st.caption(
+        "When media picks up a weather event it's the **EXIT signal** — "
+        "the trade window is closing. Confirmations are saved to DB and shown as 🟠 EXIT banners on Radar cards."
+    )
 
     from media_validator import MediaValidator, write_validation_to_db
+    import psycopg as _psycopg
 
     validator = MediaValidator()
     newsapi_configured = bool(os.environ.get("NEWSAPI_KEY"))
+    _db_url = os.environ.get("DATABASE_URL", "")
 
     # ── Status bar ────────────────────────────────────────────────────────────
-    status_cols = st.columns(2)
-    status_cols[0].success("✅ NOAA/NWS — always live (free public API)")
+    status_cols = st.columns(3)
+    status_cols[0].success("✅ NOAA/NWS — always live")
+    status_cols[1].success("✅ Google News RSS — always live")
     if newsapi_configured:
-        status_cols[1].success("✅ NewsAPI — connected")
+        status_cols[2].success("✅ NewsAPI — connected")
     else:
-        status_cols[1].warning("⚠️ NewsAPI — not configured (set NEWSAPI_KEY for news headlines)")
+        status_cols[2].warning("⚠️ NewsAPI — not set (optional)")
 
     st.divider()
 
-    # ── Run validation ────────────────────────────────────────────────────────
+    # ── Buttons ───────────────────────────────────────────────────────────────
     top_signals = filtered_ranked[filtered_ranked["Conviction"].isin({"PRIME", "ACTIONABLE"})].copy()
 
-    col_run, col_info = st.columns([1, 4])
-    run_clicked = col_run.button("🔍 Run Validation", type="primary")
+    col_run, col_monitor, col_info = st.columns([1, 1, 4])
+    run_clicked     = col_run.button("🔍 Validate Top 20", type="primary",
+                                     help="Check PRIME/ACTIONABLE signals and save confirmations to DB")
+    monitor_clicked = col_monitor.button("🔄 Run Full Monitor",
+                                         help="Run the same scan as the 4x-daily cron job (all events, last 14 days)")
     col_info.caption(
-        f"Will validate **{min(len(top_signals), 20)}** PRIME/ACTIONABLE signals against NOAA alerts"
-        + (" and NewsAPI headlines." if newsapi_configured else ". Add NEWSAPI_KEY to also check news headlines.")
+        f"**{min(len(top_signals), 20)}** PRIME/ACTIONABLE signals · "
+        f"sources: NOAA/NWS, Google News RSS"
+        + (", NewsAPI" if newsapi_configured else "")
+        + " · **Results are saved to DB** and appear as EXIT banners on Radar cards"
     )
 
+    # ── Full monitor (same as cron job) ───────────────────────────────────────
+    if monitor_clicked:
+        from media_validator import run_scheduled_monitor as _run_monitor
+        with st.spinner("Running full media monitor (all active events, last 14 days)…"):
+            import io, sys as _sys
+            buf = io.StringIO()
+            old_stdout = _sys.stdout
+            _sys.stdout = buf
+            try:
+                _run_monitor()
+            finally:
+                _sys.stdout = old_stdout
+            output = buf.getvalue()
+        st.success("✅ Full monitor complete — Radar cards will show EXIT banners for confirmed events")
+        with st.expander("Monitor log"):
+            st.code(output)
+        st.rerun()
+
+    # ── Validate Top 20 ───────────────────────────────────────────────────────
     if run_clicked:
-        # Build signal list from top ranked rows (map back to DB rows)
         signal_rows = []
         for _, ranked_row in top_signals.head(20).iterrows():
             match = df[
                 (df["region"].astype(str) == str(ranked_row.get("Region", ""))) &
-                (df["commodity"].astype(str) == str(ranked_row.get("Commodity", ""))) &
-                (df["anomaly_type"].astype(str) == normalize_anomaly_key(str(ranked_row.get("Anomaly", "")).lower().replace(" ", "_")))
+                (df["anomaly_type"].astype(str) == normalize_anomaly_key(
+                    str(ranked_row.get("Anomaly", "")).lower().replace(" ", "_")))
             ]
             if not match.empty:
                 db_row = match.iloc[0]
                 signal_rows.append({
-                    "id": None,  # no id column in current query; write skipped
-                    "region": str(db_row.get("region", "")),
+                    "region":      str(db_row.get("region", "")),
                     "anomaly_type": str(db_row.get("anomaly_type", "")),
-                    "commodity": str(db_row.get("commodity", "")),
-                    "conviction": ranked_row.get("Conviction", ""),
+                    "commodity":   str(db_row.get("commodity", "")),
+                    "conviction":  ranked_row.get("Conviction", ""),
                     "final_score": ranked_row.get("Final Trade Score", 0),
-                    "trade": ranked_row.get("Trade", ""),
+                    "trade":       ranked_row.get("Trade", ""),
                 })
 
         if not signal_rows:
             st.info("No PRIME/ACTIONABLE signals found to validate.")
         else:
             live_results = []
+            saved_count  = 0
             progress = st.progress(0, text="Validating signals…")
             for i, sig in enumerate(signal_rows):
                 summary = validator.validate_signal(
-                    signal_id=sig["id"],
+                    signal_id=None,
                     region=sig["region"],
                     anomaly=sig["anomaly_type"],
                     commodity=sig["commodity"],
@@ -2928,31 +2957,45 @@ with tab_media:
                 if summary.is_confirmed and summary.best_result:
                     br = summary.best_result
                     live_results.append({
-                        "Region": sig["region"],
-                        "Anomaly": sig["anomaly_type"].replace("_", " ").title(),
-                        "Commodity": sig["commodity"],
-                        "Trade": sig["trade"],
-                        "Score": sig["final_score"],
-                        "Conviction": sig["conviction"],
-                        "Source": br.source,
-                        "Headline": br.headline,
+                        "Region":      sig["region"],
+                        "Anomaly":     sig["anomaly_type"].replace("_", " ").title(),
+                        "Commodity":   sig["commodity"],
+                        "Trade":       sig["trade"],
+                        "Score":       sig["final_score"],
+                        "Conviction":  sig["conviction"],
+                        "Source":      br.source,
+                        "Headline":    br.headline,
                         "Match Score": round(br.score, 1),
-                        "URL": br.url,
+                        "URL":         br.url,
                     })
-                progress.progress((i + 1) / len(signal_rows), text=f"Checked {i+1}/{len(signal_rows)}: {sig['region']} {sig['anomaly_type']}")
+                    # ── Persist to DB so EXIT banner shows on Radar card ──────
+                    if _db_url:
+                        try:
+                            with _psycopg.connect(_db_url) as _conn:
+                                write_validation_to_db(_conn, None, summary)
+                            saved_count += 1
+                        except Exception:
+                            pass
+                progress.progress(
+                    (i + 1) / len(signal_rows),
+                    text=f"Checked {i+1}/{len(signal_rows)}: {sig['region']} / {sig['anomaly_type']}"
+                )
 
             progress.empty()
 
             if live_results:
-                st.success(f"✅ {len(live_results)} signal(s) confirmed by external sources")
+                st.success(
+                    f"✅ {len(live_results)} confirmed · "
+                    f"{saved_count} saved to DB · Radar cards will show EXIT banners after reload"
+                )
                 live_df = pd.DataFrame(live_results).sort_values("Score", ascending=False)
                 st.dataframe(live_df.drop(columns=["URL"]), use_container_width=True)
-                st.caption("Sources:")
+                st.caption("Article links:")
                 for r in live_results:
                     if r["URL"]:
                         st.markdown(f"- [{r['Headline'][:100]}]({r['URL']}) — *{r['Source']}*")
             else:
-                st.info("No external confirmation found for current PRIME/ACTIONABLE signals. NOAA may have no active alerts in these regions right now.")
+                st.info("No external confirmation found. NOAA may have no active alerts in these regions right now.")
 
     st.divider()
 
