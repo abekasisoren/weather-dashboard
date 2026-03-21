@@ -65,6 +65,11 @@ _MIGRATE_STMTS = [
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS trend_dir       TEXT",
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS confluence_bonus FLOAT",
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS pheno_mult      FLOAT",
+    # Media-triggered close columns — populated when media confirms the weather event
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS closed_at        TIMESTAMPTZ",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS exit_price        DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_exit_price    DOUBLE PRECISION",
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS close_reason      TEXT",
 ]
 
 
@@ -270,6 +275,106 @@ def _maybe_persist_snapshots(df: pd.DataFrame) -> None:
             conn.commit()
 
 
+# ─── Media-triggered position close ──────────────────────────────────────────
+
+def close_positions_from_media() -> int:
+    """
+    For any open recommendation whose underlying weather event has been confirmed
+    by media, mark the position as CLOSED at the media pickup date price.
+
+    Matching logic:
+      recommendations_log.(region, anomaly) ↔ weather_global_shocks.(region, anomaly_type)
+      Only closes if media_pickup_at >= logged_at (confirmed AFTER entry)
+
+    Exit price: Yahoo Finance historical close on the media_pickup_at date.
+    Sets: closed_at, exit_price, spy_exit_price, close_reason = 'media_confirmed'
+
+    Returns number of positions newly closed.
+    """
+    if not DATABASE_URL:
+        return 0
+
+    # ── Step 1: Find open recommendations matched to confirmed weather events ──
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (rl.id)
+                        rl.id,
+                        rl.stock_symbol,
+                        rl.trade,
+                        rl.entry_price,
+                        rl.spy_entry,
+                        rl.logged_at::date            AS entry_date,
+                        ws.media_pickup_at::date      AS pickup_date
+                    FROM recommendations_log rl
+                    INNER JOIN weather_global_shocks ws
+                        ON  ws.region       = rl.region
+                        AND ws.anomaly_type = rl.anomaly
+                        AND ws.media_validated  = TRUE
+                        AND ws.media_pickup_at  IS NOT NULL
+                        AND ws.media_pickup_at  >= rl.logged_at
+                    WHERE rl.closed_at IS NULL
+                    ORDER BY rl.id, ws.media_pickup_at ASC
+                    """
+                )
+                to_close = cur.fetchall()
+    except Exception:
+        return 0
+
+    if not to_close:
+        return 0
+
+    # ── Step 2: Build per-symbol date ranges and fetch Yahoo history ───────────
+    fetch_ranges: dict[str, tuple[date, date]] = {}
+
+    def _extend_range(sym: str, d: date) -> None:
+        lo, hi = fetch_ranges.get(sym, (d, d))
+        fetch_ranges[sym] = (min(lo, d), max(hi, d))
+
+    for _id, sym, _trade, _ep, _se, _ed, pickup_date in to_close:
+        _extend_range(sym, pickup_date)
+        _extend_range("SPY", pickup_date)
+
+    histories: dict[str, dict[date, float]] = {}
+    for sym, (lo, hi) in fetch_ranges.items():
+        histories[sym] = _yahoo_history_range(sym, lo - timedelta(days=5), hi + timedelta(days=2))
+
+    # ── Step 3: Write exit price + close timestamp for each position ───────────
+    closed_count = 0
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                for rec_id, symbol, trade, entry_p, spy_entry, entry_date, pickup_date in to_close:
+                    exit_p   = _closest_price_on_or_before(histories.get(symbol, {}), pickup_date)
+                    spy_exit = _closest_price_on_or_before(histories.get("SPY",   {}), pickup_date)
+                    if exit_p is None:
+                        continue  # no price data for that date yet — skip
+
+                    closed_ts = datetime.combine(pickup_date, datetime.min.time()).replace(
+                        tzinfo=timezone.utc
+                    )
+                    cur.execute(
+                        """
+                        UPDATE recommendations_log
+                        SET
+                            closed_at       = %s,
+                            exit_price      = %s,
+                            spy_exit_price  = %s,
+                            close_reason    = 'media_confirmed'
+                        WHERE id = %s AND closed_at IS NULL
+                        """,
+                        (closed_ts, exit_p, spy_exit, rec_id),
+                    )
+                    closed_count += 1
+            conn.commit()
+    except Exception:
+        pass
+
+    return closed_count
+
+
 # ─── Log recommendations ──────────────────────────────────────────────────────
 
 def get_recently_recommended_combos(hours: int = 24) -> set[tuple[str, str, str]]:
@@ -416,11 +521,15 @@ def _outcome_label(pnl: Optional[float]) -> str:
 def get_aftermath_table() -> pd.DataFrame:
     """
     Load all logged recommendations.
+    0. Auto-close positions where media has confirmed the weather event.
     1. Persist T+3 / T+5 historical snapshots for rows that are due.
-    2. Fetch live Finnhub prices for still-open positions (< T+5).
-    3. Compute multi-horizon P&L and alpha vs SPY.
+    2. Fetch live Finnhub prices for still-open positions (< T+10).
+    3. Compute multi-horizon P&L and alpha vs SPY, including media-exit P&L.
     4. Return enriched display DataFrame.
     """
+    # ── Step 0: Auto-close positions confirmed by media ───────────────────────
+    close_positions_from_media()
+
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -431,7 +540,8 @@ def get_aftermath_table() -> pd.DataFrame:
                        price_t3, price_t5, spy_t3, spy_t5,
                        price_t7, price_t10, spy_t7, spy_t10,
                        sigma_score, seasonality_sc, trend_dir,
-                       confluence_bonus, pheno_mult
+                       confluence_bonus, pheno_mult,
+                       closed_at, exit_price, spy_exit_price, close_reason
                 FROM recommendations_log
                 ORDER BY logged_at DESC
                 """
@@ -448,10 +558,17 @@ def get_aftermath_table() -> pd.DataFrame:
     # ── Step 1: Persist T+3/T+5 snapshots where due ───────────────────────────
     _maybe_persist_snapshots(df)
 
+    # Coerce new columns if they don't exist (pre-migration rows)
+    for _col in ("closed_at", "exit_price", "spy_exit_price", "close_reason"):
+        if _col not in df.columns:
+            df[_col] = None
+
     # ── Step 2: Fetch live prices for open positions (T+10 not yet due) ─────
     today = datetime.now(timezone.utc).date()
-    open_mask = df["price_t10"].isna() & df["logged_at"].apply(
-        lambda x: _business_days_after(x, 10) > today
+    open_mask = (
+        df["closed_at"].isna()          # not yet media-closed
+        & df["price_t10"].isna()
+        & df["logged_at"].apply(lambda x: _business_days_after(x, 10) > today)
     )
     open_symbols = df.loc[open_mask, "stock_symbol"].dropna().unique().tolist()
     live_symbols = list(set(open_symbols) | ({"SPY"} if open_symbols else set()))
@@ -518,15 +635,43 @@ def get_aftermath_table() -> pd.DataFrame:
         ), axis=1
     )
 
-    # Best available P&L for Outcome: prefer T+10 > T+7 > T+5 > T+3 > current
+    # ── Exit P&L (media-triggered close) ──────────────────────────────────────
+    df["pnl_exit"] = df.apply(
+        lambda r: _compute_pnl(r["trade"], r.get("entry_price"), r.get("exit_price")), axis=1
+    )
+    df["alpha_exit"] = df.apply(
+        lambda r: _compute_alpha(
+            r["trade"], r.get("entry_price"), r.get("exit_price"),
+            r.get("spy_entry"), r.get("spy_exit_price"),
+        ), axis=1
+    )
+
+    # Best available P&L: media exit > T+10 > T+7 > T+5 > T+3 > current
+    # Media exit is the ACTUAL close, so it takes priority over theoretical horizons
     df["best_pnl"] = df.apply(
-        lambda r: r["pnl_t10"] if r["pnl_t10"] is not None
+        lambda r: r["pnl_exit"]   if r["pnl_exit"]   is not None
+                  else r["pnl_t10"] if r["pnl_t10"] is not None
                   else r["pnl_t7"]  if r["pnl_t7"]  is not None
                   else r["pnl_t5"]  if r["pnl_t5"]  is not None
                   else r["pnl_t3"]  if r["pnl_t3"]  is not None
                   else r["pnl_current"],
         axis=1,
     )
+
+    # Status label
+    def _status_label(row) -> str:
+        if row.get("close_reason") == "media_confirmed":
+            closed_dt = row.get("closed_at")
+            date_str = ""
+            if closed_dt is not None:
+                try:
+                    date_str = f" {pd.Timestamp(closed_dt).strftime('%b %d')}"
+                except Exception:
+                    pass
+            return f"🚪 Closed{date_str}"
+        return "⏳ Open"
+
+    df["status"] = df.apply(_status_label, axis=1)
     df["outcome"] = df["best_pnl"].apply(_outcome_label)
 
     # ── Step 4: Build display DataFrame ───────────────────────────────────────
@@ -544,9 +689,14 @@ def get_aftermath_table() -> pd.DataFrame:
 
     display = pd.DataFrame({
         "Date Logged":  pd.to_datetime(df["logged_at"]).dt.strftime("%Y-%m-%d"),
+        "Status":       df["status"],
         "Stock":        df["stock_symbol"],
         "Trade":        df["trade"],
         "Entry":        df["entry_price"].apply(lambda x: fmt(x, prefix="$")),
+        # ── Media exit (actual close) ─────────────────────────────────────────
+        "Exit P&L":     df["pnl_exit"].apply(lambda x: fmt(x, suffix="%", sign=True)),
+        "Exit α SPY":   df["alpha_exit"].apply(fmt_alpha),
+        # ── Theoretical horizons ──────────────────────────────────────────────
         "Day 0 P&L":    df["pnl_current"].apply(lambda x: fmt(x, suffix="%", sign=True)),
         "T+3 P&L":      df["pnl_t3"].apply(lambda x: fmt(x, suffix="%", sign=True)),
         "T+3 α SPY":    df["alpha_t3"].apply(fmt_alpha),
@@ -564,6 +714,8 @@ def get_aftermath_table() -> pd.DataFrame:
         "Why":          df["why_it_matters"],
         # Hidden raw columns for stats / ML
         "_pnl_raw":       df["best_pnl"],
+        "_pnl_exit_raw":  df["pnl_exit"],
+        "_alpha_exit_raw":df["alpha_exit"],
         "_pnl_t3_raw":    df["pnl_t3"],
         "_pnl_t5_raw":    df["pnl_t5"],
         "_pnl_t7_raw":    df["pnl_t7"],
@@ -572,6 +724,7 @@ def get_aftermath_table() -> pd.DataFrame:
         "_alpha_t5_raw":  df["alpha_t5"],
         "_alpha_t7_raw":  df["alpha_t7"],
         "_alpha_t10_raw": df["alpha_t10"],
+        "_is_closed":     df["close_reason"].eq("media_confirmed"),
         # ML feature snapshot columns
         "_sigma":      df["sigma_score"] if "sigma_score" in df.columns else pd.Series(1.0, index=df.index),
         "_seasonality": df["seasonality_sc"] if "seasonality_sc" in df.columns else pd.Series(5.0, index=df.index),
@@ -602,21 +755,25 @@ def get_performance_summary(aftermath_df: pd.DataFrame) -> dict:
     best_idx  = pnl_series.idxmax()
     worst_idx = pnl_series.idxmin()
 
-    t3_count  = aftermath_df["_pnl_t3_raw"].dropna().shape[0]  if "_pnl_t3_raw"  in aftermath_df.columns else 0
-    t5_count  = aftermath_df["_pnl_t5_raw"].dropna().shape[0]  if "_pnl_t5_raw"  in aftermath_df.columns else 0
-    t7_count  = aftermath_df["_pnl_t7_raw"].dropna().shape[0]  if "_pnl_t7_raw"  in aftermath_df.columns else 0
-    t10_count = aftermath_df["_pnl_t10_raw"].dropna().shape[0] if "_pnl_t10_raw" in aftermath_df.columns else 0
+    t3_count   = aftermath_df["_pnl_t3_raw"].dropna().shape[0]   if "_pnl_t3_raw"   in aftermath_df.columns else 0
+    t5_count   = aftermath_df["_pnl_t5_raw"].dropna().shape[0]   if "_pnl_t5_raw"   in aftermath_df.columns else 0
+    t7_count   = aftermath_df["_pnl_t7_raw"].dropna().shape[0]   if "_pnl_t7_raw"   in aftermath_df.columns else 0
+    t10_count  = aftermath_df["_pnl_t10_raw"].dropna().shape[0]  if "_pnl_t10_raw"  in aftermath_df.columns else 0
+    exit_count = aftermath_df["_pnl_exit_raw"].dropna().shape[0] if "_pnl_exit_raw" in aftermath_df.columns else 0
+    closed_count = int(aftermath_df["_is_closed"].sum()) if "_is_closed" in aftermath_df.columns else 0
 
     return {
-        "total":         total,
-        "wins":          int(wins),
-        "losses":        int(losses),
-        "win_rate":      round(wins / total * 100, 1) if total else 0,
-        "avg_pnl":       round(float(pnl_series.mean()), 2),
-        "best_trade":    f"{aftermath_df.loc[best_idx, 'Stock']} {pnl_series[best_idx]:+.2f}%",
-        "worst_trade":   f"{aftermath_df.loc[worst_idx, 'Stock']} {pnl_series[worst_idx]:+.2f}%",
-        "t3_evaluated":  t3_count,
-        "t5_evaluated":  t5_count,
-        "t7_evaluated":  t7_count,
-        "t10_evaluated": t10_count,
+        "total":          total,
+        "wins":           int(wins),
+        "losses":         int(losses),
+        "win_rate":       round(wins / total * 100, 1) if total else 0,
+        "avg_pnl":        round(float(pnl_series.mean()), 2),
+        "best_trade":     f"{aftermath_df.loc[best_idx, 'Stock']} {pnl_series[best_idx]:+.2f}%",
+        "worst_trade":    f"{aftermath_df.loc[worst_idx, 'Stock']} {pnl_series[worst_idx]:+.2f}%",
+        "t3_evaluated":   t3_count,
+        "t5_evaluated":   t5_count,
+        "t7_evaluated":   t7_count,
+        "t10_evaluated":  t10_count,
+        "exit_evaluated": exit_count,
+        "closed_count":   closed_count,
     }
