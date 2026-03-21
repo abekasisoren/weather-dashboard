@@ -275,6 +275,51 @@ def _maybe_persist_snapshots(df: pd.DataFrame) -> None:
             conn.commit()
 
 
+# ─── Region + anomaly family maps for media-triggered close ──────────────────
+# The DB stores events at fine-grained (region, anomaly_type) level, but
+# recommendations are logged at a potentially different grain. Family maps
+# let "Brazil Center-South / heavy_rain" close "Brazil / flood_risk" trades.
+
+_CLOSE_REGION_FAMILY: dict[str, frozenset] = {
+    "Brazil":               frozenset({"Brazil", "Brazil Center-South", "Mato Grosso"}),
+    "Brazil Center-South":  frozenset({"Brazil", "Brazil Center-South", "Mato Grosso"}),
+    "Mato Grosso":          frozenset({"Brazil", "Brazil Center-South", "Mato Grosso"}),
+    "US Midwest":           frozenset({"US Midwest", "US Southern Plains"}),
+    "US Southern Plains":   frozenset({"US Midwest", "US Southern Plains"}),
+    "Europe Gas Belt":      frozenset({"Europe Gas Belt", "Southern Europe", "North Sea"}),
+    "Southern Europe":      frozenset({"Europe Gas Belt", "Southern Europe", "North Sea"}),
+    "North Sea":            frozenset({"Europe Gas Belt", "Southern Europe", "North Sea"}),
+    "Australia East":       frozenset({"Australia East", "Western Australia"}),
+    "Western Australia":    frozenset({"Australia East", "Western Australia"}),
+}
+
+_CLOSE_ANOMALY_FAMILY: dict[str, frozenset] = {
+    # Wet / flood cluster
+    "heavy_rain":        frozenset({"heavy_rain", "flood_risk", "flood", "atmospheric_river"}),
+    "flood_risk":        frozenset({"flood_risk", "heavy_rain", "flood", "atmospheric_river"}),
+    "flood":             frozenset({"flood", "flood_risk", "heavy_rain"}),
+    "atmospheric_river": frozenset({"atmospheric_river", "heavy_rain", "flood_risk"}),
+    # Heat / fire cluster
+    "heatwave":          frozenset({"heatwave", "extreme_heat", "wildfire_risk", "drought"}),
+    "extreme_heat":      frozenset({"extreme_heat", "heatwave", "wildfire_risk"}),
+    "wildfire_risk":     frozenset({"wildfire_risk", "wildfire", "heatwave", "extreme_heat"}),
+    "wildfire":          frozenset({"wildfire", "wildfire_risk"}),
+    # Cold cluster
+    "cold_wave":         frozenset({"cold_wave", "polar_vortex", "frost", "ice_storm"}),
+    "polar_vortex":      frozenset({"polar_vortex", "cold_wave", "frost", "extreme_wind"}),
+    "frost":             frozenset({"frost", "cold_wave", "ice_storm"}),
+    "ice_storm":         frozenset({"ice_storm", "frost", "cold_wave"}),
+    # Dry cluster
+    "drought":           frozenset({"drought", "heatwave", "monsoon_failure"}),
+    "monsoon_failure":   frozenset({"monsoon_failure", "drought"}),
+    # Wind cluster
+    "storm_wind":        frozenset({"storm_wind", "hurricane_risk", "extreme_wind"}),
+    "hurricane_risk":    frozenset({"hurricane_risk", "hurricane", "storm_wind"}),
+    "hurricane":         frozenset({"hurricane", "hurricane_risk", "storm_wind"}),
+    "extreme_wind":      frozenset({"extreme_wind", "storm_wind", "hurricane_risk"}),
+}
+
+
 # ─── Media-triggered position close ──────────────────────────────────────────
 
 def close_positions_from_media() -> int:
@@ -282,9 +327,9 @@ def close_positions_from_media() -> int:
     For any open recommendation whose underlying weather event has been confirmed
     by media, mark the position as CLOSED at the media pickup date price.
 
-    Matching logic:
-      recommendations_log.(region, anomaly) ↔ weather_global_shocks.(region, anomaly_type)
-      Only closes if media_pickup_at >= logged_at (confirmed AFTER entry)
+    Uses REGION FAMILY + ANOMALY FAMILY matching so that e.g.
+    "Brazil Center-South / heavy_rain" confirmation closes
+    "Brazil / flood_risk" recommendations (same weather event, different grain).
 
     Exit price: Yahoo Finance historical close on the media_pickup_at date.
     Sets: closed_at, exit_price, spy_exit_price, close_reason = 'media_confirmed'
@@ -294,63 +339,87 @@ def close_positions_from_media() -> int:
     if not DATABASE_URL:
         return 0
 
-    # ── Step 1: Find open recommendations matched to confirmed weather events ──
+    # ── Step 1: Fetch all confirmed weather events ─────────────────────────────
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT DISTINCT ON (rl.id)
-                        rl.id,
-                        rl.stock_symbol,
-                        rl.trade,
-                        rl.entry_price,
-                        rl.spy_entry,
-                        rl.logged_at::date            AS entry_date,
-                        ws.media_pickup_at::date      AS pickup_date
-                    FROM recommendations_log rl
-                    INNER JOIN weather_global_shocks ws
-                        ON  ws.region       = rl.region
-                        AND ws.anomaly_type = rl.anomaly
-                        AND ws.media_validated  = TRUE
-                        AND ws.media_pickup_at  IS NOT NULL
-                        AND ws.media_pickup_at  >= rl.logged_at
-                    WHERE rl.closed_at IS NULL
-                    ORDER BY rl.id, ws.media_pickup_at ASC
+                    SELECT DISTINCT ON (region, anomaly_type)
+                        region, anomaly_type, media_pickup_at::date AS pickup_date
+                    FROM weather_global_shocks
+                    WHERE media_validated = TRUE
+                      AND media_pickup_at IS NOT NULL
+                    ORDER BY region, anomaly_type, media_pickup_at ASC
                     """
                 )
-                to_close = cur.fetchall()
+                confirmed_events = cur.fetchall()
+    except Exception:
+        return 0
+
+    if not confirmed_events:
+        return 0
+
+    # ── Step 2: Expand each confirmed event to its region+anomaly families ─────
+    # Map: (frozenset of regions, frozenset of anomalies) → earliest pickup_date
+    family_buckets: dict[tuple, date] = {}
+    for region, anomaly_type, pickup_date in confirmed_events:
+        r_family = _CLOSE_REGION_FAMILY.get(region, frozenset({region}))
+        a_family = _CLOSE_ANOMALY_FAMILY.get(anomaly_type, frozenset({anomaly_type}))
+        key = (r_family, a_family)
+        if key not in family_buckets or pickup_date < family_buckets[key]:
+            family_buckets[key] = pickup_date
+
+    # ── Step 3: Find open recommendations matching any family bucket ───────────
+    to_close: list[tuple] = []  # (rec_id, symbol, trade, entry_p, spy_entry, pickup_date)
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                for (r_family, a_family), pickup_date in family_buckets.items():
+                    cur.execute(
+                        """
+                        SELECT id, stock_symbol, trade, entry_price, spy_entry
+                        FROM recommendations_log
+                        WHERE region  = ANY(%s)
+                          AND anomaly = ANY(%s)
+                          AND closed_at IS NULL
+                          AND logged_at::date <= %s
+                        """,
+                        (list(r_family), list(a_family), pickup_date),
+                    )
+                    for row in cur.fetchall():
+                        to_close.append((*row, pickup_date))
     except Exception:
         return 0
 
     if not to_close:
         return 0
 
-    # ── Step 2: Build per-symbol date ranges and fetch Yahoo history ───────────
+    # ── Step 4: Fetch Yahoo Finance prices at pickup date ─────────────────────
     fetch_ranges: dict[str, tuple[date, date]] = {}
 
-    def _extend_range(sym: str, d: date) -> None:
+    def _ext(sym: str, d: date) -> None:
         lo, hi = fetch_ranges.get(sym, (d, d))
         fetch_ranges[sym] = (min(lo, d), max(hi, d))
 
-    for _id, sym, _trade, _ep, _se, _ed, pickup_date in to_close:
-        _extend_range(sym, pickup_date)
-        _extend_range("SPY", pickup_date)
+    for rec_id, symbol, trade, entry_p, spy_entry, pickup_date in to_close:
+        _ext(symbol, pickup_date)
+        _ext("SPY",  pickup_date)
 
     histories: dict[str, dict[date, float]] = {}
     for sym, (lo, hi) in fetch_ranges.items():
         histories[sym] = _yahoo_history_range(sym, lo - timedelta(days=5), hi + timedelta(days=2))
 
-    # ── Step 3: Write exit price + close timestamp for each position ───────────
+    # ── Step 5: Write exit price + close timestamp ─────────────────────────────
     closed_count = 0
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
-                for rec_id, symbol, trade, entry_p, spy_entry, entry_date, pickup_date in to_close:
+                for rec_id, symbol, trade, entry_p, spy_entry, pickup_date in to_close:
                     exit_p   = _closest_price_on_or_before(histories.get(symbol, {}), pickup_date)
                     spy_exit = _closest_price_on_or_before(histories.get("SPY",   {}), pickup_date)
                     if exit_p is None:
-                        continue  # no price data for that date yet — skip
+                        continue  # price data not yet available for that date
 
                     closed_ts = datetime.combine(pickup_date, datetime.min.time()).replace(
                         tzinfo=timezone.utc
@@ -358,11 +427,10 @@ def close_positions_from_media() -> int:
                     cur.execute(
                         """
                         UPDATE recommendations_log
-                        SET
-                            closed_at       = %s,
-                            exit_price      = %s,
-                            spy_exit_price  = %s,
-                            close_reason    = 'media_confirmed'
+                        SET closed_at      = %s,
+                            exit_price     = %s,
+                            spy_exit_price = %s,
+                            close_reason   = 'media_confirmed'
                         WHERE id = %s AND closed_at IS NULL
                         """,
                         (closed_ts, exit_p, spy_exit, rec_id),

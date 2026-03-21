@@ -2780,11 +2780,36 @@ with tab_radar:
 
     if hide_confirmed and _n_confirmed_hidden > 0:
         st.info(
-            f"🚪 **{_n_confirmed_hidden} media-confirmed event(s) hidden** — EXIT window open, "
-            f"alpha gone. View them in the Media Signals tab or uncheck "
-            f"'Hide media-confirmed events' in the sidebar.",
+            f"🚪 **{_n_confirmed_hidden} region(s) hidden** — media confirmed, EXIT window open. "
+            f"Expand below to see them, or uncheck '🚪 Hide media-confirmed events' in the sidebar.",
             icon=None,
         )
+        # ── Expandable list of hidden confirmed events ─────────────────────────
+        with st.expander(f"🔍 View {_n_confirmed_hidden} hidden media-confirmed event(s)"):
+            _confirmed_rows = df[
+                df["region"].astype(str).isin(_confirmed_regions)
+            ].drop_duplicates(subset=["region", "anomaly_type"]).copy()
+
+            if not _confirmed_rows.empty:
+                _show_cols = ["region", "anomaly_type", "commodity", "trade_bias",
+                              "media_headline", "media_source", "media_pickup_at"]
+                _avail = [c for c in _show_cols if c in _confirmed_rows.columns]
+
+                # Format pickup time
+                if "media_pickup_at" in _confirmed_rows.columns:
+                    _confirmed_rows["media_pickup_at"] = _confirmed_rows["media_pickup_at"].apply(
+                        lambda ts: (
+                            ts.strftime("%b %d %Y %H:%M UTC")
+                            if hasattr(ts, "strftime") else str(ts)[:16]
+                        ) if ts is not None else ""
+                    )
+                st.dataframe(_confirmed_rows[_avail], use_container_width=True)
+                st.caption(
+                    "These events have been picked up by media — the trade thesis is now public. "
+                    "Consider these as EXIT signals for any open positions."
+                )
+            else:
+                st.write("No confirmed event details available.")
 
     st.divider()
 
