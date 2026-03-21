@@ -67,25 +67,52 @@ class ValidationSummary:
 # ─── Keyword mapping ──────────────────────────────────────────────────────────
 
 ANOMALY_KEYWORDS: dict[str, list[str]] = {
-    "heatwave":          ["heatwave", "heat wave", "extreme heat", "record temperature"],
-    "extreme_heat":      ["extreme heat", "record heat", "dangerous heat", "heat emergency"],
-    "frost":             ["frost", "freeze", "freezing temperatures", "crop freeze"],
-    "cold_wave":         ["cold wave", "cold snap", "arctic blast", "deep freeze"],
-    "polar_vortex":      ["polar vortex", "arctic vortex", "extreme cold", "polar blast"],
-    "drought":           ["drought", "dry conditions", "water shortage", "crop stress"],
-    "heavy_rain":        ["heavy rain", "heavy rainfall", "flooding", "severe weather"],
-    "flood_risk":        ["flood risk", "flood warning", "flooding", "flash flood"],
-    "flood":             ["flooding", "flood", "inundation", "storm flooding"],
-    "atmospheric_river": ["atmospheric river", "bomb cyclone", "historic rainfall", "extreme precipitation"],
-    "monsoon_failure":   ["monsoon failure", "monsoon delay", "below-normal rain", "drought monsoon"],
-    "storm_wind":        ["severe storm", "storm damage", "high winds", "wind damage"],
-    "hurricane_risk":    ["hurricane", "tropical storm", "cyclone", "hurricane warning"],
-    "hurricane":         ["hurricane", "major hurricane", "cyclone", "tropical storm"],
-    "wildfire_risk":     ["wildfire risk", "fire danger", "red flag warning", "fire weather"],
-    "wildfire":          ["wildfire", "forest fire", "fire evacuation", "wildfire spread"],
-    "tornado":           ["tornado", "tornado warning", "severe thunderstorm", "tornado outbreak"],
-    "ice_storm":         ["ice storm", "freezing rain", "winter storm", "ice accumulation"],
-    "extreme_wind":      ["extreme wind", "gale force", "wind storm", "offshore wind disruption"],
+    "heatwave":          ["heatwave", "heat wave", "extreme heat", "record heat", "record temperature",
+                          "dangerous heat", "heat emergency", "scorching", "sweltering"],
+    "extreme_heat":      ["extreme heat", "record heat", "dangerous heat", "heat emergency",
+                          "heatwave", "heat wave", "record high", "heat advisory"],
+    "frost":             ["frost", "freeze", "freezing temperatures", "crop freeze",
+                          "hard freeze", "killing frost", "frost warning", "freeze warning"],
+    "cold_wave":         ["cold wave", "cold snap", "arctic blast", "deep freeze",
+                          "arctic cold", "polar blast", "bitterly cold", "extreme cold",
+                          "record cold", "cold weather", "freezing cold"],
+    "polar_vortex":      ["polar vortex", "arctic vortex", "extreme cold", "polar blast",
+                          "arctic air", "polar air", "winter blast", "deep freeze"],
+    "drought":           ["drought", "dry conditions", "water shortage", "crop stress",
+                          "drought conditions", "water deficit", "drying", "parched",
+                          "below-normal rainfall", "drought monitor"],
+    "heavy_rain":        ["heavy rain", "heavy rainfall", "flooding", "severe weather",
+                          "torrential rain", "downpour", "deluges", "record rainfall"],
+    "flood_risk":        ["flood risk", "flood warning", "flooding", "flash flood",
+                          "flood watch", "flood advisory", "inundation", "flood threat"],
+    "flood":             ["flooding", "flood", "inundation", "storm flooding",
+                          "flash flood", "river flooding", "flood damage"],
+    "atmospheric_river": ["atmospheric river", "bomb cyclone", "historic rainfall",
+                          "extreme precipitation", "pineapple express", "massive storm",
+                          "record rain"],
+    "monsoon_failure":   ["monsoon failure", "monsoon delay", "below-normal rain",
+                          "drought monsoon", "weak monsoon", "monsoon deficit",
+                          "poor monsoon", "monsoon shortfall"],
+    "storm_wind":        ["severe storm", "storm damage", "high winds", "wind damage",
+                          "wind storm", "damaging winds", "destructive winds", "gale"],
+    "hurricane_risk":    ["hurricane", "tropical storm", "cyclone", "hurricane warning",
+                          "tropical cyclone", "hurricane watch", "tropical depression"],
+    "hurricane":         ["hurricane", "major hurricane", "cyclone", "tropical storm",
+                          "category", "hurricane landfall", "storm surge"],
+    "wildfire_risk":     ["wildfire", "wildfire risk", "fire danger", "red flag warning",
+                          "fire weather", "fire weather watch", "fire conditions",
+                          "high fire danger", "wildfire threat", "fire season",
+                          "burning conditions", "fire risk"],
+    "wildfire":          ["wildfire", "forest fire", "fire evacuation", "wildfire spread",
+                          "wildfire burning", "acres burned", "fire containment",
+                          "wildfire smoke", "brush fire", "grass fire"],
+    "tornado":           ["tornado", "tornado warning", "severe thunderstorm",
+                          "tornado outbreak", "twister", "funnel cloud"],
+    "ice_storm":         ["ice storm", "freezing rain", "winter storm", "ice accumulation",
+                          "ice glaze", "sleet", "winter weather", "icy conditions"],
+    "extreme_wind":      ["extreme wind", "gale force", "wind storm", "offshore wind disruption",
+                          "severe wind", "destructive wind", "hurricane-force wind",
+                          "strong winds"],
 }
 
 REGION_CONTEXT: dict[str, list[str]] = {
@@ -149,6 +176,28 @@ class MediaValidator:
 
     # ── NewsAPI ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _score_text(text: str, keywords: list[str], region_terms: list[str]) -> float:
+        """
+        Score a piece of text against all keywords and region terms.
+        Awards points for ANY matching keyword (cap 4.0) + ANY matching region term (cap 4.0).
+        This way a headline only needs ONE keyword hit + ONE region hit to qualify.
+        """
+        text_lower = text.lower()
+        kw_score = 0.0
+        for kw in keywords:
+            if kw.lower() in text_lower:
+                kw_score += 2.0
+                if kw_score >= 4.0:
+                    break
+        rt_score = 0.0
+        for rt in region_terms:
+            if rt.lower() in text_lower:
+                rt_score += 2.0
+                if rt_score >= 4.0:
+                    break
+        return min(10.0, kw_score + rt_score)
+
     def check_newsapi(
         self,
         region: str,
@@ -156,67 +205,62 @@ class MediaValidator:
         commodity: str,
         lookback_hours: int = 168,  # 7 days for scheduled monitor
     ) -> Optional[MediaResult]:
-        """Query NewsAPI for headlines matching the weather event."""
+        """
+        Query NewsAPI for headlines matching the weather event.
+        Tries up to 3 keyword+region query combinations to maximise recall.
+        """
         if not self._newsapi_available:
             return None
 
-        keywords    = ANOMALY_KEYWORDS.get(anomaly, [anomaly.replace("_", " ")])
+        keywords     = ANOMALY_KEYWORDS.get(anomaly, [anomaly.replace("_", " ")])
         region_terms = REGION_CONTEXT.get(region, [region])
-        query = f"({keywords[0]}) AND ({region_terms[0]})"
+        from_date    = (datetime.now(UTC) - timedelta(hours=lookback_hours)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
 
-        try:
-            from_date = (datetime.now(UTC) - timedelta(hours=lookback_hours)).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            )
-            params = urllib.parse.urlencode({
-                "q":        query,
-                "from":     from_date,
-                "sortBy":   "relevancy",
-                "language": "en",
-                "pageSize": 5,
-                "apiKey":   self.newsapi_key,
-            })
-            url = f"https://newsapi.org/v2/everything?{params}"
+        # Try multiple keyword+region combinations for broader recall
+        queries_tried: set[str] = set()
+        for kw in keywords[:3]:
+            for rt in region_terms[:2]:
+                q = f'"{kw}" {rt}'
+                if q in queries_tried:
+                    continue
+                queries_tried.add(q)
+                try:
+                    params = urllib.parse.urlencode({
+                        "q":        q,
+                        "from":     from_date,
+                        "sortBy":   "relevancy",
+                        "language": "en",
+                        "pageSize": 5,
+                        "apiKey":   self.newsapi_key,
+                    })
+                    url = f"https://newsapi.org/v2/everything?{params}"
+                    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        data = json.loads(resp.read().decode())
 
-            req = urllib.request.Request(url, headers={"Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-
-            articles = data.get("articles", [])
-            if not articles:
-                return None
-
-            best   = articles[0]
-            title  = best.get("title", "")
-            body   = (best.get("description", "") or "").lower()
-            text   = (title + " " + body).lower()
-
-            score = 0.0
-            for kw in keywords:
-                if kw.lower() in text:
-                    score += 2.5
-            for term in region_terms:
-                if term.lower() in text:
-                    score += 2.5
-            score = min(10.0, score)
-
-            if score >= 5.0:
-                raw_dt    = best.get("publishedAt")
-                published = (
-                    datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
-                    if raw_dt else None
-                )
-                return MediaResult(
-                    validated=True,
-                    source="NewsAPI",
-                    headline=title,
-                    score=score,
-                    url=best.get("url", ""),
-                    published_at=published,
-                )
-
-        except Exception:
-            pass
+                    for article in data.get("articles", []):
+                        title = article.get("title", "") or ""
+                        body  = (article.get("description", "") or "")
+                        text  = title + " " + body
+                        score = self._score_text(text, keywords, region_terms)
+                        if score >= 4.0:
+                            raw_dt    = article.get("publishedAt")
+                            published = (
+                                datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
+                                if raw_dt else None
+                            )
+                            return MediaResult(
+                                validated=True,
+                                source="NewsAPI",
+                                headline=title,
+                                score=score,
+                                url=article.get("url", ""),
+                                published_at=published,
+                            )
+                except Exception:
+                    continue
 
         return None
 
@@ -270,76 +314,205 @@ class MediaValidator:
     ) -> Optional[MediaResult]:
         """
         Search Google News RSS — free, no API key, global coverage.
-        Used as fallback when NewsAPI is unavailable.
+        Tries multiple keyword+region query variants for maximum recall.
+        Note: commodity is intentionally excluded from the query — it confuses
+        the search and yields worse results.
+        """
+        from email.utils import parsedate_to_datetime as _parse_date
+
+        keywords     = ANOMALY_KEYWORDS.get(anomaly, [anomaly.replace("_", " ")])
+        region_terms = REGION_CONTEXT.get(region, [region])
+        cutoff       = datetime.now(UTC) - timedelta(hours=lookback_hours)
+
+        queries_tried: set[str] = set()
+        for kw in keywords[:4]:          # try up to 4 keyword variants
+            for rt in region_terms[:2]:  # × up to 2 region terms
+                q = f"{kw} {rt}"
+                if q in queries_tried:
+                    continue
+                queries_tried.add(q)
+
+                encoded = urllib.parse.quote(q)
+                url = (
+                    f"https://news.google.com/rss/search"
+                    f"?q={encoded}&hl=en-US&gl=US&ceid=US:en"
+                )
+                try:
+                    req = urllib.request.Request(url, headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; WeatherTrader/1.0)",
+                        "Accept":     "application/rss+xml, application/xml, text/xml",
+                    })
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        raw = resp.read().decode("utf-8", errors="replace")
+
+                    root  = ET.fromstring(raw)
+                    items = root.findall(".//item")
+
+                    for item in items[:10]:
+                        title  = (item.findtext("title") or "").strip()
+                        link   = (item.findtext("link") or "").strip()
+                        pubraw = (item.findtext("pubDate") or "").strip()
+
+                        # Age filter
+                        published: Optional[datetime] = None
+                        if pubraw:
+                            try:
+                                published = _parse_date(pubraw)
+                                if published.tzinfo is None:
+                                    published = published.replace(tzinfo=UTC)
+                                if published < cutoff:
+                                    continue
+                            except Exception:
+                                pass
+
+                        score = self._score_text(title, keywords, region_terms)
+                        if score >= 3.5:
+                            return MediaResult(
+                                validated=True,
+                                source="Google News",
+                                headline=title,
+                                score=score,
+                                url=link,
+                                published_at=published,
+                            )
+
+                except Exception:
+                    continue  # try next query variant
+
+        return None
+
+    # ── GDELT (Global Database of Events, Language, and Tone) ─────────────────
+
+    def check_gdelt(
+        self,
+        region: str,
+        anomaly: str,
+        commodity: str,
+        lookback_days: int = 7,
+    ) -> Optional[MediaResult]:
+        """
+        GDELT v2 Doc API — free, no API key, indexes millions of global news
+        articles. Excellent for financial-relevant weather event detection.
         """
         keywords     = ANOMALY_KEYWORDS.get(anomaly, [anomaly.replace("_", " ")])
         region_terms = REGION_CONTEXT.get(region, [region])
 
-        # Build a focused query: top anomaly keyword + region term + commodity
-        query = f"{keywords[0]} {region_terms[0]} {commodity}".strip()
-        encoded = urllib.parse.quote(query)
-        url = (
-            f"https://news.google.com/rss/search"
-            f"?q={encoded}&hl=en-US&gl=US&ceid=US:en"
-        )
+        queries_tried: set[str] = set()
+        for kw in keywords[:4]:
+            for rt in region_terms[:2]:
+                q = f'"{kw}" {rt}'
+                if q in queries_tried:
+                    continue
+                queries_tried.add(q)
 
-        try:
-            req = urllib.request.Request(url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; WeatherTrader/1.0)",
-                "Accept":     "application/rss+xml, application/xml, text/xml",
-            })
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
+                encoded = urllib.parse.quote(q)
+                url = (
+                    f"https://api.gdeltproject.org/api/v2/doc/doc"
+                    f"?query={encoded}"
+                    f"&mode=artlist&format=json"
+                    f"&maxrecords=10"
+                    f"&timespan={lookback_days}d"
+                    f"&sort=DateDesc"
+                )
+                try:
+                    req = urllib.request.Request(url, headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; WeatherTrader/1.0)",
+                    })
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        data = json.loads(resp.read().decode("utf-8", errors="replace"))
 
-            root  = ET.fromstring(raw)
-            items = root.findall(".//item")
-            if not items:
-                return None
-
-            cutoff = datetime.now(UTC) - timedelta(hours=lookback_hours)
-
-            for item in items[:10]:
-                title  = (item.findtext("title") or "").strip()
-                link   = (item.findtext("link") or "").strip()
-                pubraw = (item.findtext("pubDate") or "").strip()
-
-                # Parse published date
-                published: Optional[datetime] = None
-                if pubraw:
-                    try:
-                        from email.utils import parsedate_to_datetime
-                        published = parsedate_to_datetime(pubraw)
-                        if published.tzinfo is None:
-                            published = published.replace(tzinfo=UTC)
-                        if published < cutoff:
+                    for article in (data.get("articles") or [])[:5]:
+                        title = (article.get("title") or "").strip()
+                        link  = (article.get("url") or "").strip()
+                        if not title:
                             continue
-                    except Exception:
-                        pass
+                        score = self._score_text(title, keywords, region_terms)
+                        if score >= 3.5:
+                            return MediaResult(
+                                validated=True,
+                                source="GDELT",
+                                headline=title,
+                                score=score,
+                                url=link,
+                                published_at=None,
+                            )
 
-                text  = title.lower()
-                score = 0.0
-                for kw in keywords:
-                    if kw.lower() in text:
-                        score += 2.0
-                for term in region_terms:
-                    if term.lower() in text:
-                        score += 2.0
-                if commodity.lower() in text:
-                    score += 1.0
-                score = min(10.0, score)
+                except Exception:
+                    continue
 
-                if score >= 4.0:
-                    return MediaResult(
-                        validated=True,
-                        source="Google News",
-                        headline=title,
-                        score=score,
-                        url=link,
-                        published_at=published,
-                    )
+        return None
 
-        except Exception:
-            pass
+    # ── Bing News RSS (additional free source) ────────────────────────────────
+
+    def check_bing_news_rss(
+        self,
+        region: str,
+        anomaly: str,
+        commodity: str,
+        lookback_hours: int = 168,
+    ) -> Optional[MediaResult]:
+        """
+        Bing News RSS — free, no API key, broad English-language coverage.
+        Good complement to Google News for global events.
+        """
+        from email.utils import parsedate_to_datetime as _parse_date
+
+        keywords     = ANOMALY_KEYWORDS.get(anomaly, [anomaly.replace("_", " ")])
+        region_terms = REGION_CONTEXT.get(region, [region])
+        cutoff       = datetime.now(UTC) - timedelta(hours=lookback_hours)
+
+        queries_tried: set[str] = set()
+        for kw in keywords[:3]:
+            for rt in region_terms[:2]:
+                q = f"{kw} {rt}"
+                if q in queries_tried:
+                    continue
+                queries_tried.add(q)
+
+                encoded = urllib.parse.quote(q)
+                url = f"https://www.bing.com/news/search?q={encoded}&format=RSS"
+                try:
+                    req = urllib.request.Request(url, headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                      "Chrome/120.0 Safari/537.36",
+                        "Accept":     "application/rss+xml, text/xml, */*",
+                    })
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        raw = resp.read().decode("utf-8", errors="replace")
+
+                    root  = ET.fromstring(raw)
+                    items = root.findall(".//item")
+
+                    for item in items[:10]:
+                        title  = (item.findtext("title") or "").strip()
+                        link   = (item.findtext("link") or "").strip()
+                        pubraw = (item.findtext("pubDate") or "").strip()
+
+                        published: Optional[datetime] = None
+                        if pubraw:
+                            try:
+                                published = _parse_date(pubraw)
+                                if published.tzinfo is None:
+                                    published = published.replace(tzinfo=UTC)
+                                if published < cutoff:
+                                    continue
+                            except Exception:
+                                pass
+
+                        score = self._score_text(title, keywords, region_terms)
+                        if score >= 3.5:
+                            return MediaResult(
+                                validated=True,
+                                source="Bing News",
+                                headline=title,
+                                score=score,
+                                url=link,
+                                published_at=published,
+                            )
+
+                except Exception:
+                    continue
 
         return None
 
@@ -354,7 +527,9 @@ class MediaValidator:
     ) -> ValidationSummary:
         """
         Run all available sources for a single signal.
-        Order: NewsAPI → NOAA/NWS → Google News RSS
+        Order: NewsAPI → NOAA/NWS → Google News RSS → GDELT → Bing News RSS
+        Stops as soon as a high-confidence result (score >= 6.0) is found to
+        save time; otherwise collects all results and picks the best.
         """
         summary = ValidationSummary(
             signal_id=signal_id,
@@ -363,25 +538,43 @@ class MediaValidator:
             commodity=commodity,
         )
 
-        # 1. NewsAPI (if key available)
+        # 1. NewsAPI (if key available) — highest quality, paid source
         news_result = self.check_newsapi(region, anomaly, commodity)
         if news_result:
             summary.results.append(news_result)
+            if news_result.score >= 6.0:
+                return summary  # high confidence, no need to check further
 
-        # 2. NOAA/NWS alerts (US regions only, free)
+        # 2. NOAA/NWS alerts (US regions only, free official source)
         US_REGIONS = {
             "US Midwest", "US Southern Plains", "US Gulf",
             "Southeast US", "California", "US Pacific Northwest",
             "Texas + Permian Basin",
         }
         if region in US_REGIONS:
-            summary.results.extend(self.check_noaa_alerts(region))
+            noaa_results = self.check_noaa_alerts(region)
+            summary.results.extend(noaa_results)
+            if noaa_results and noaa_results[0].score >= 6.0:
+                return summary
 
-        # 3. Google News RSS — free global fallback (runs even if NewsAPI found something)
-        if not summary.is_confirmed or not self._newsapi_available:
-            rss_result = self.check_google_news_rss(region, anomaly, commodity)
-            if rss_result:
-                summary.results.append(rss_result)
+        # 3. Google News RSS — free, global, most reliable free source
+        google_result = self.check_google_news_rss(region, anomaly, commodity)
+        if google_result:
+            summary.results.append(google_result)
+            if google_result.score >= 6.0:
+                return summary
+
+        # 4. GDELT — free global news database, excellent recall for weather events
+        gdelt_result = self.check_gdelt(region, anomaly, commodity)
+        if gdelt_result:
+            summary.results.append(gdelt_result)
+            if gdelt_result.score >= 6.0:
+                return summary
+
+        # 5. Bing News RSS — additional free source for edge cases
+        bing_result = self.check_bing_news_rss(region, anomaly, commodity)
+        if bing_result:
+            summary.results.append(bing_result)
 
         return summary
 

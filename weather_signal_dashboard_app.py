@@ -2930,13 +2930,15 @@ with tab_media:
     _db_url = os.environ.get("DATABASE_URL", "")
 
     # ── Status bar ────────────────────────────────────────────────────────────
-    status_cols = st.columns(3)
-    status_cols[0].success("✅ NOAA/NWS — always live")
-    status_cols[1].success("✅ Google News RSS — always live")
+    status_cols = st.columns(5)
+    status_cols[0].success("✅ NOAA/NWS")
+    status_cols[1].success("✅ Google News")
+    status_cols[2].success("✅ GDELT")
+    status_cols[3].success("✅ Bing News")
     if newsapi_configured:
-        status_cols[2].success("✅ NewsAPI — connected")
+        status_cols[4].success("✅ NewsAPI")
     else:
-        status_cols[2].warning("⚠️ NewsAPI — not set (optional)")
+        status_cols[4].warning("⚠️ NewsAPI (optional)")
 
     st.divider()
 
@@ -2949,10 +2951,10 @@ with tab_media:
     monitor_clicked = col_monitor.button("🔄 Run Full Monitor",
                                          help="Run the same scan as the 4x-daily cron job (all events, last 14 days)")
     col_info.caption(
-        f"**{min(len(top_signals), 20)}** PRIME/ACTIONABLE signals · "
-        f"sources: NOAA/NWS, Google News RSS"
+        f"**{min(len(top_signals), 20)}** PRIME/ACTIONABLE weather events · "
+        f"sources: NOAA/NWS, Google News, GDELT, Bing News"
         + (", NewsAPI" if newsapi_configured else "")
-        + " · **Results are saved to DB** and appear as EXIT banners on Radar cards"
+        + " · **Confirmations saved to DB** → EXIT banners appear on Radar cards"
     )
 
     # ── Full monitor (same as cron job) ───────────────────────────────────────
