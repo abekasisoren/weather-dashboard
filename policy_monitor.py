@@ -81,68 +81,137 @@ def ensure_policy_schema():
 
 # ─── Officials Registry ───────────────────────────────────────────────────────
 # (name, title, country_code, official_type, weight)
-# weight 3 = market-moving (Fed, ECB, etc.), 2 = significant, 1 = regional
+# weight 3 = global market mover (single statement can move indices)
+# weight 2 = significant (moves sector/country ETF reliably)
+# weight 1 = regional (moves single-country or EM assets)
 
 OFFICIALS = [
-    # ── United States ──────────────────────────────────────────────────────────
-    ("Powell",          "Fed Chair",             "US", "central_bank",  3),
-    ("Bessent",         "US Treasury Secretary", "US", "treasury",      3),
-    ("Waller",          "Fed Governor",          "US", "central_bank",  2),
-    ("Jefferson",       "Fed Vice Chair",        "US", "central_bank",  2),
-    ("Williams",        "NY Fed President",      "US", "central_bank",  2),
-    ("Daly",            "SF Fed President",      "US", "central_bank",  2),
-    # ── Euro Zone ─────────────────────────────────────────────────────────────
-    ("Lagarde",         "ECB President",         "EU", "central_bank",  3),
-    ("de Guindos",      "ECB Vice President",    "EU", "central_bank",  2),
-    ("Schnabel",        "ECB Board",             "EU", "central_bank",  2),
-    ("Nagel",           "Bundesbank President",  "DE", "central_bank",  2),
-    ("Kukies",          "Germany FinMin",        "DE", "treasury",      2),
-    ("Le Maire",        "France FinMin",         "FR", "treasury",      2),
-    # ── United Kingdom ────────────────────────────────────────────────────────
-    ("Bailey",          "BoE Governor",          "UK", "central_bank",  3),
-    ("Reeves",          "UK Chancellor",         "UK", "treasury",      2),
-    # ── Japan ─────────────────────────────────────────────────────────────────
-    ("Ueda",            "BoJ Governor",          "JP", "central_bank",  3),
-    ("Kato",            "Japan Finance Minister","JP", "treasury",      2),
-    # ── China ─────────────────────────────────────────────────────────────────
-    ("Pan Gongsheng",   "PBOC Governor",         "CN", "central_bank",  3),
-    ("Lan Fo'an",       "China Finance Minister","CN", "treasury",      2),
-    ("Li Qiang",        "China Premier",         "CN", "executive",     2),
-    # ── Canada ────────────────────────────────────────────────────────────────
-    ("Macklem",         "Bank of Canada Governor","CA","central_bank",  2),
-    ("Carney",          "Canada PM",             "CA", "executive",     2),
-    ("Freeland",        "Canada Deputy PM",      "CA", "treasury",      2),
-    # ── Australia ─────────────────────────────────────────────────────────────
-    ("Bullock",         "RBA Governor",          "AU", "central_bank",  2),
-    ("Chalmers",        "Australia Treasurer",   "AU", "treasury",      2),
-    # ── India ─────────────────────────────────────────────────────────────────
-    ("Das",             "RBI Governor",          "IN", "central_bank",  2),
-    ("Sitharaman",      "India Finance Minister","IN", "treasury",      2),
-    # ── Brazil ────────────────────────────────────────────────────────────────
-    ("Neto",            "BCB Governor",          "BR", "central_bank",  2),
-    ("Haddad",          "Brazil Finance Minister","BR","treasury",      2),
-    # ── Saudi Arabia / Gulf ───────────────────────────────────────────────────
-    ("Al-Jadaan",       "Saudi Finance Minister","SA", "treasury",      2),
-    ("Al-Kholifey",     "SAMA Governor",         "SA", "central_bank",  2),
-    # ── South Korea ───────────────────────────────────────────────────────────
-    ("Choi Sang-mok",   "Korea Finance Minister","KR", "treasury",      2),
-    ("Rhee Chang-yong", "Bank of Korea Governor","KR", "central_bank",  2),
-    # ── Turkey ────────────────────────────────────────────────────────────────
-    ("Simsek",          "Turkey Finance Minister","TR","treasury",      2),
-    ("Karahan",         "TCMB Governor",         "TR", "central_bank",  2),
-    # ── Mexico ────────────────────────────────────────────────────────────────
-    ("Heath",           "Banxico Governor",      "MX", "central_bank",  2),
-    # ── South Africa ──────────────────────────────────────────────────────────
-    ("Kganyago",        "SARB Governor",         "ZA", "central_bank",  2),
-    # ── Russia ────────────────────────────────────────────────────────────────
-    ("Nabiullina",      "Russia CBR Governor",   "RU", "central_bank",  2),
-    ("Siluanov",        "Russia Finance Minister","RU","treasury",      2),
-    # ── IMF / World Bank ──────────────────────────────────────────────────────
-    ("Georgieva",       "IMF Managing Director", "INT","multilateral",  2),
-    ("Banga",           "World Bank President",  "INT","multilateral",  2),
-    # ── OPEC ──────────────────────────────────────────────────────────────────
-    ("Haitham",         "OPEC Secretary General","INT","multilateral",  2),
-    ("Al Ghais",        "OPEC Secretary General","INT","multilateral",  2),
+    # ══ United States ══════════════════════════════════════════════════════════
+    # President & cabinet — each tweet/statement can move SPY ±1%
+    ("Trump",           "US President",                "US", "executive",     3),
+    ("Powell",          "Fed Chair",                   "US", "central_bank",  3),
+    ("Bessent",         "US Treasury Secretary",       "US", "treasury",      3),
+    ("Lutnick",         "US Commerce Secretary",       "US", "executive",     2),  # tariff authority
+    ("Navarro",         "US Trade Advisor",            "US", "executive",     2),  # trade war architect
+    ("Goolsbee",        "Chicago Fed President",       "US", "central_bank",  2),
+    ("Waller",          "Fed Governor",                "US", "central_bank",  2),
+    ("Jefferson",       "Fed Vice Chair",              "US", "central_bank",  2),
+    ("Williams",        "NY Fed President",            "US", "central_bank",  2),
+    ("Daly",            "SF Fed President",            "US", "central_bank",  2),
+    ("Musalem",         "St Louis Fed President",      "US", "central_bank",  2),
+    ("Schmid",          "Kansas City Fed President",   "US", "central_bank",  2),
+    ("Kugler",          "Fed Governor",                "US", "central_bank",  2),
+
+    # ══ Euro Zone ══════════════════════════════════════════════════════════════
+    ("Lagarde",         "ECB President",               "EU", "central_bank",  3),
+    ("von der Leyen",   "EU Commission President",     "EU", "executive",     2),  # fiscal/trade policy
+    ("de Guindos",      "ECB Vice President",          "EU", "central_bank",  2),
+    ("Schnabel",        "ECB Board",                   "EU", "central_bank",  2),
+    ("Villeroy",        "Bank of France Governor",     "FR", "central_bank",  2),
+    ("Knot",            "Dutch Central Bank Governor", "NL", "central_bank",  2),
+    ("Nagel",           "Bundesbank President",        "DE", "central_bank",  2),
+    ("Rehn",            "Bank of Finland Governor",    "FI", "central_bank",  1),
+    ("Wunsch",          "National Bank Belgium",       "BE", "central_bank",  1),
+    ("Kukies",          "Germany FinMin",              "DE", "treasury",      2),
+    ("Merz",            "German Chancellor",           "DE", "executive",     2),
+    ("Macron",          "France President",            "FR", "executive",     2),
+
+    # ══ United Kingdom ═════════════════════════════════════════════════════════
+    ("Bailey",          "BoE Governor",                "UK", "central_bank",  3),
+    ("Reeves",          "UK Chancellor",               "UK", "treasury",      2),
+    ("Mann",            "BoE MPC Member",              "UK", "central_bank",  1),
+    ("Dhingra",         "BoE MPC Member",              "UK", "central_bank",  1),
+
+    # ══ Japan ══════════════════════════════════════════════════════════════════
+    ("Ueda",            "BoJ Governor",                "JP", "central_bank",  3),
+    ("Kato",            "Japan Finance Minister",      "JP", "treasury",      2),
+    ("Suzuki",          "Japan Finance Minister",      "JP", "treasury",      2),  # name may rotate
+    ("Kanda",           "Japan VP Finance for FX",     "JP", "treasury",      3),  # calls yen intervention
+
+    # ══ China ══════════════════════════════════════════════════════════════════
+    ("Xi",              "China President",             "CN", "executive",     3),
+    ("Pan Gongsheng",   "PBOC Governor",               "CN", "central_bank",  3),
+    ("Lan Fo'an",       "China Finance Minister",      "CN", "treasury",      2),
+    ("Li Qiang",        "China Premier",               "CN", "executive",     2),
+    ("He Lifeng",       "China Economic Tsar",         "CN", "executive",     2),
+
+    # ══ Canada ═════════════════════════════════════════════════════════════════
+    ("Macklem",         "Bank of Canada Governor",     "CA", "central_bank",  2),
+    ("Carney",          "Canada PM",                   "CA", "executive",     2),
+    ("Freeland",        "Canada Deputy PM",            "CA", "treasury",      2),
+
+    # ══ Australia ══════════════════════════════════════════════════════════════
+    ("Bullock",         "RBA Governor",                "AU", "central_bank",  2),
+    ("Chalmers",        "Australia Treasurer",         "AU", "treasury",      2),
+
+    # ══ India ══════════════════════════════════════════════════════════════════
+    ("Malhotra",        "RBI Governor",                "IN", "central_bank",  2),
+    ("Das",             "Former RBI Governor",         "IN", "central_bank",  1),
+    ("Sitharaman",      "India Finance Minister",      "IN", "treasury",      2),
+    ("Modi",            "India Prime Minister",        "IN", "executive",     2),
+
+    # ══ Brazil ═════════════════════════════════════════════════════════════════
+    ("Galipolo",        "BCB Governor",                "BR", "central_bank",  2),
+    ("Haddad",          "Brazil Finance Minister",     "BR", "treasury",      2),
+    ("Lula",            "Brazil President",            "BR", "executive",     2),
+
+    # ══ Saudi Arabia / Gulf ════════════════════════════════════════════════════
+    ("bin Salman",      "Saudi Crown Prince",          "SA", "executive",     3),  # OPEC+ & oil price
+    ("Al-Jadaan",       "Saudi Finance Minister",      "SA", "treasury",      2),
+    ("Al-Kholifey",     "SAMA Governor",               "SA", "central_bank",  2),
+
+    # ══ South Korea ════════════════════════════════════════════════════════════
+    ("Choi Sang-mok",   "Korea Finance Minister",      "KR", "treasury",      2),
+    ("Rhee Chang-yong", "Bank of Korea Governor",      "KR", "central_bank",  2),
+
+    # ══ Turkey ═════════════════════════════════════════════════════════════════
+    ("Erdogan",         "Turkey President",            "TR", "executive",     2),  # overrides CBbank
+    ("Simsek",          "Turkey Finance Minister",     "TR", "treasury",      2),
+    ("Karahan",         "TCMB Governor",               "TR", "central_bank",  2),
+
+    # ══ Mexico ═════════════════════════════════════════════════════════════════
+    ("Sheinbaum",       "Mexico President",            "MX", "executive",     2),
+    ("Alcocer",         "Banxico Governor",            "MX", "central_bank",  2),
+    ("Heath",           "Banxico Deputy Governor",     "MX", "central_bank",  1),
+
+    # ══ Argentina ══════════════════════════════════════════════════════════════
+    ("Milei",           "Argentina President",         "AR", "executive",     2),  # peso/IMF watch
+    ("Caputo",          "Argentina Finance Minister",  "AR", "treasury",      2),
+
+    # ══ South Africa ═══════════════════════════════════════════════════════════
+    ("Kganyago",        "SARB Governor",               "ZA", "central_bank",  2),
+    ("Godongwana",      "South Africa FinMin",         "ZA", "treasury",      1),
+
+    # ══ Russia ═════════════════════════════════════════════════════════════════
+    ("Nabiullina",      "Russia CBR Governor",         "RU", "central_bank",  2),
+    ("Siluanov",        "Russia Finance Minister",     "RU", "treasury",      2),
+
+    # ══ Middle East / Geopolitical ═════════════════════════════════════════════
+    ("Netanyahu",       "Israel Prime Minister",       "IL", "executive",     2),  # oil risk premium
+    ("Khamenei",        "Iran Supreme Leader",         "IR", "executive",     2),  # oil sanctions
+    ("Pezeshkian",      "Iran President",              "IR", "executive",     1),
+
+    # ══ Nigeria / Africa ═══════════════════════════════════════════════════════
+    ("Edun",            "Nigeria Finance Minister",    "NG", "treasury",      1),
+    ("Cardoso",         "CBN Governor",                "NG", "central_bank",  1),
+
+    # ══ Indonesia ══════════════════════════════════════════════════════════════
+    ("Indrawati",       "Indonesia Finance Minister",  "ID", "treasury",      2),
+    ("Warjiyo",         "Bank Indonesia Governor",     "ID", "central_bank",  1),
+
+    # ══ IMF / World Bank / BIS ═════════════════════════════════════════════════
+    ("Georgieva",       "IMF Managing Director",       "INT","multilateral",  2),
+    ("Banga",           "World Bank President",        "INT","multilateral",  2),
+    ("Carstens",        "BIS General Manager",         "INT","multilateral",  2),  # central bank of CBs
+
+    # ══ OPEC / Energy ══════════════════════════════════════════════════════════
+    ("Al Ghais",        "OPEC Secretary General",      "INT","multilateral",  2),
+
+    # ══ Market Voices (not officials, but statements move markets) ═════════════
+    ("Dimon",           "JPMorgan CEO",                "US", "market_voice",  2),
+    ("Fink",            "BlackRock CEO",               "US", "market_voice",  2),
+    ("Buffett",         "Berkshire Hathaway CEO",      "US", "market_voice",  2),
+    ("Dalio",           "Bridgewater Founder",         "US", "market_voice",  1),
 ]
 
 # Country-level ETF proxies for localised signals
@@ -164,6 +233,12 @@ COUNTRY_ETFS: dict[str, list[str]] = {
     "MX": ["EWW"],
     "ZA": ["EZA"],
     "RU": ["RSX"],
+    "NL": ["EWN"],      # Netherlands (Knot)
+    "AR": ["ARGT"],     # Argentina (Milei, Caputo)
+    "IL": ["EIS"],      # Israel (Netanyahu)
+    "IR": [],           # Iran — no liquid ETF
+    "NG": ["NGE"],      # Nigeria (Edun, Cardoso)
+    "ID": ["EIDO"],     # Indonesia (Indrawati, Warjiyo)
 }
 
 # ─── Sentiment Keyword Dictionaries ──────────────────────────────────────────
