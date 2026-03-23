@@ -75,6 +75,8 @@ _MIGRATE_STMTS = [
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS exit_price        DOUBLE PRECISION",
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS spy_exit_price    DOUBLE PRECISION",
     "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS close_reason      TEXT",
+    # Signal source: 'weather' (default) or 'mining'
+    "ALTER TABLE recommendations_log ADD COLUMN IF NOT EXISTS source            TEXT DEFAULT 'weather'",
 ]
 
 
@@ -768,11 +770,12 @@ def get_recently_recommended_combos(hours: int = 24) -> set[tuple[str, str, str]
         return set()
 
 
-def log_recommendations(pulse_df: pd.DataFrame) -> int:
+def log_recommendations(pulse_df: pd.DataFrame, source: str = "weather") -> int:
     """
     Log current Pulse Trader recommendations to recommendations_log.
     - Fetches entry price (Finnhub) + SPY entry price for benchmark at time of logging.
     - Cooldown: skips (symbol, region, anomaly) already logged in last 24 hours.
+    - source: 'weather' (default) or 'mining' — stored for Aftermath filtering.
     Returns number of rows inserted.
     """
     if pulse_df.empty:
@@ -810,6 +813,7 @@ def log_recommendations(pulse_df: pd.DataFrame) -> int:
             "final_trade_score":  float(row.get("Final Trade Score", 0)),
             "conviction":         str(row.get("Conviction", "")),
             "why_it_matters":     str(row.get("Why It Matters", ""))[:500],
+            "source":             source,
             # ML feature snapshot — captured at logging time
             "sigma_score":        float(row.get("Sigma Score", 1.0)),
             "seasonality_sc":     float(row.get("Seasonality", 5.0)),
@@ -829,14 +833,14 @@ def log_recommendations(pulse_df: pd.DataFrame) -> int:
                     INSERT INTO recommendations_log
                         (signal_date, stock_symbol, trade, entry_price, spy_entry,
                          region, anomaly, commodity, final_trade_score,
-                         conviction, why_it_matters,
+                         conviction, why_it_matters, source,
                          sigma_score, seasonality_sc, trend_dir,
                          confluence_bonus, pheno_mult)
                     VALUES (%(signal_date)s, %(stock_symbol)s, %(trade)s,
                             %(entry_price)s, %(spy_entry)s,
                             %(region)s, %(anomaly)s,
                             %(commodity)s, %(final_trade_score)s,
-                            %(conviction)s, %(why_it_matters)s,
+                            %(conviction)s, %(why_it_matters)s, %(source)s,
                             %(sigma_score)s, %(seasonality_sc)s, %(trend_dir)s,
                             %(confluence_bonus)s, %(pheno_mult)s)
                     """,
@@ -1065,8 +1069,17 @@ def get_aftermath_table() -> pd.DataFrame:
         arrow = "↑" if x > 0 else ("↓" if x < 0 else "→")
         return f"{arrow}{abs(x):.2f}%"
 
+    # Source label for display (default to weather for pre-existing rows)
+    _source_map = {"mining": "⛏️ Mining", "weather": "🌤️ Weather"}
+    _source_col = (
+        df["source"].map(_source_map).fillna("🌤️ Weather")
+        if "source" in df.columns
+        else pd.Series("🌤️ Weather", index=df.index)
+    )
+
     display = pd.DataFrame({
         "Date Logged":  pd.to_datetime(df["logged_at"]).dt.strftime("%Y-%m-%d"),
+        "Source":       _source_col,
         "Status":       df["status"],
         "Stock":        df["stock_symbol"],
         "Trade":        df["trade"],

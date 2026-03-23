@@ -2767,7 +2767,9 @@ anomaly_coverage = df["anomaly_type"].nunique()
 st.title("Global Weather Signal Dashboard")
 st.caption("Early weather intelligence for markets ranked like a trading radar.")
 
-tab_radar, tab_pulse, tab_media, tab_aftermath = st.tabs(["🌍 Radar", "📊 Pulse Trader", "📡 Media Signals", "📈 Aftermath"])
+tab_radar, tab_pulse, tab_mining, tab_media, tab_aftermath = st.tabs([
+    "🌍 Radar", "📊 Pulse Trader", "⛏️ Mining Signals", "📡 Media Signals", "📈 Aftermath"
+])
 
 with tab_radar:
 
@@ -2981,52 +2983,284 @@ with tab_radar:
 
 with tab_pulse:
     st.header("🌐 Global Pulse Trader")
-    st.caption("One row per equity — aggregates all weather signals per stock.")
+    st.caption(
+        "One row per equity — combines **🌤️ Weather** signals (GRIB-driven) "
+        "and **⛏️ Mining** signals (news-driven supply disruptions)."
+    )
 
-    pulse_source = filtered.copy()
-    pulse_table = build_global_pulse_trader_table(pulse_source)
-
-    # ── Entry Gate: classify each signal as Enter / Monitor / Avoid ───────────
-    # 🟢 ENTER  — pre-media, event is new or worsening (highest alpha window)
-    # 🟡 MONITOR — event is stable; worth watching but alpha is narrowing
-    # 🔴 AVOID  — event is recovering (fading); alpha window likely closed
+    # ── Entry Gate helper (shared by weather + mining) ────────────────────────
     def _entry_gate(row) -> str:
         trend = str(row.get("Trend", "")).lower()
-        if "worsening" in trend:
-            return "🟢 Enter — Worsening"
+        if "worsening" in trend or "escalating" in trend:
+            return "🟢 Enter — Escalating"
         if "new" in trend:
             return "🟢 Enter — New Signal"
         if "stable" in trend:
             return "🟡 Monitor"
-        if "recovering" in trend:
+        if "recovering" in trend or "de-escalating" in trend:
             return "🔴 Avoid — Fading"
         return "🟡 Monitor"
 
-    if not pulse_table.empty:
-        pulse_table.insert(0, "Entry Gate", pulse_table.apply(_entry_gate, axis=1))
+    # ── Weather recommendations ────────────────────────────────────────────────
+    pulse_source  = filtered.copy()
+    weather_pulse = build_global_pulse_trader_table(pulse_source)
+    if not weather_pulse.empty:
+        weather_pulse.insert(0, "Source", "🌤️ Weather")
+
+    # ── Mining recommendations ─────────────────────────────────────────────────
+    try:
+        from mining_news_monitor import get_active_signals, build_mining_pulse_table
+        _mining_signals = get_active_signals()
+        mining_pulse = build_mining_pulse_table(_mining_signals)
+    except Exception as _me:
+        mining_pulse = pd.DataFrame()
+        st.caption(f"⚠️ Mining signals unavailable: {_me}")
+
+    # ── Combine ────────────────────────────────────────────────────────────────
+    pulse_parts = [t for t in [weather_pulse, mining_pulse] if not t.empty]
+    if pulse_parts:
+        pulse_table = pd.concat(pulse_parts, ignore_index=True, sort=False)
+        # Fill missing cols so both sources display cleanly
+        for _col in ["Source", "Entry Gate", "Country", "Signal Bucket", "Supply Impact %", "Event Type"]:
+            if _col not in pulse_table.columns:
+                pulse_table[_col] = ""
+        pulse_table["Source"] = pulse_table["Source"].fillna("🌤️ Weather")
+        pulse_table["Entry Gate"] = pulse_table.apply(_entry_gate, axis=1)
+    else:
+        pulse_table = pd.DataFrame()
 
     _pulse_cols = [
-        "Entry Gate", "Date", "Stock Trade", "Trade",
-        "Why It Matters", "Final Trade Score",
+        "Entry Gate", "Source", "Date", "Stock Trade", "Trade",
+        "Region", "Commodity", "Why It Matters", "Final Trade Score", "Conviction",
     ]
 
     if pulse_table.empty:
         st.write("No recommendations right now.")
     else:
-        display_pulse = pulse_table[
-            [c for c in _pulse_cols if c in pulse_table.columns]
-        ].copy()
-        st.dataframe(display_pulse, use_container_width=True, height=500)
+        # Tabs within Pulse Trader for All / Weather only / Mining only
+        pt_all, pt_weather, pt_mining_tab = st.tabs(["All", "🌤️ Weather only", "⛏️ Mining only"])
 
-        st.caption(
-            "**Entry Gate:** "
-            "🟢 Enter = event actively growing, pre-media — highest alpha window.  "
-            "🟡 Monitor = stable signal, alpha narrowing — size down or wait.  "
-            "🔴 Avoid = event fading in GRIB data — thesis deteriorating, skip or exit."
+        def _show_pulse(df: pd.DataFrame, label: str) -> None:
+            if df.empty:
+                st.write(f"No {label} recommendations right now.")
+                return
+            disp = df[[c for c in _pulse_cols if c in df.columns]].copy()
+            st.dataframe(disp, use_container_width=True, height=480)
+            st.caption(
+                "**Entry Gate:** "
+                "🟢 Enter = event actively growing — highest alpha window.  "
+                "🟡 Monitor = stable, alpha narrowing.  "
+                "🔴 Avoid = event fading — skip or exit existing position."
+            )
+            with st.expander(f"Full detail ({len(df)} rows)"):
+                st.dataframe(df, use_container_width=True)
+
+        with pt_all:
+            _show_pulse(pulse_table, "combined")
+
+        with pt_weather:
+            _show_pulse(
+                pulse_table[pulse_table["Source"] == "🌤️ Weather"].reset_index(drop=True),
+                "weather",
+            )
+
+        with pt_mining_tab:
+            _show_pulse(
+                pulse_table[pulse_table["Source"] == "⛏️ Mining"].reset_index(drop=True),
+                "mining",
+            )
+
+
+# ─── Mining Signals tab ───────────────────────────────────────────────────────
+
+with tab_mining:
+    st.header("⛏️ Mining Supply Disruption Radar")
+    st.caption(
+        "Monitors 20+ global mining regions across copper, lithium, iron ore, gold, "
+        "nickel, uranium, rare earths and more. Detects strikes, mine closures, "
+        "government seizures, tailings failures, and geopolitical disruptions via "
+        "GDELT, Google News, NewsAPI and Bing — then scores their commodity impact."
+    )
+
+    try:
+        from mining_news_monitor import (
+            get_active_signals, scan_all_regions,
+            build_mining_pulse_table, deactivate_stale_signals,
+            ensure_mining_schema,
         )
+        ensure_mining_schema()
+    except Exception as _me:
+        st.error(f"Mining monitor import error: {_me}")
+        st.stop()
 
-        with st.expander(f"Full detail ({len(pulse_table)} rows)"):
-            st.dataframe(pulse_table, use_container_width=True)
+    # ── Scan controls ──────────────────────────────────────────────────────────
+    m_c1, m_c2, m_c3 = st.columns([1, 1, 4])
+    scan_clicked    = m_c1.button("🔍 Scan Now", type="primary",
+                                  help="Scan all 20+ mining regions for breaking news")
+    refresh_clicked = m_c2.button("🔄 Refresh",
+                                  help="Reload signals from DB without rescanning")
+
+    if scan_clicked:
+        with st.spinner("Scanning 20+ mining regions across 5 news sources…"):
+            try:
+                n_found = scan_all_regions()
+                deactivate_stale_signals(days=7)
+                st.session_state["mining_signals_df"] = get_active_signals()
+                st.session_state["mining_scanned_at"] = pd.Timestamp.now().strftime("%H:%M:%S")
+                if n_found:
+                    st.success(f"✅ Found / updated **{n_found}** signal(s).")
+                else:
+                    st.info("No qualifying supply-disruption events found this scan.")
+            except Exception as _e:
+                st.error(f"Scan error: {_e}")
+
+    if refresh_clicked or "mining_signals_df" not in st.session_state:
+        st.session_state["mining_signals_df"] = get_active_signals()
+        st.session_state["mining_scanned_at"] = "on load"
+
+    mining_df    = st.session_state.get("mining_signals_df", pd.DataFrame())
+    scanned_at   = st.session_state.get("mining_scanned_at", "—")
+    m_c3.caption(f"Last scan: **{scanned_at}**  |  {len(mining_df)} active signal(s)")
+
+    if mining_df.empty:
+        st.info(
+            "No active mining signals yet. Click **🔍 Scan Now** to scan all regions, "
+            "or signals appear automatically when the news monitor detects a qualifying event."
+        )
+    else:
+        # ── Summary metrics ────────────────────────────────────────────────────
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Active Signals",   len(mining_df))
+        m2.metric("Regions Affected", mining_df["region"].nunique())
+        m3.metric("Commodities",      mining_df["commodity"].nunique())
+        extreme_count = int((mining_df["signal_level"] >= 3).sum())
+        m4.metric("Strong/Extreme",   extreme_count)
+
+        st.divider()
+
+        # ── Severity filter ────────────────────────────────────────────────────
+        _all_buckets = ["WATCH", "MODERATE", "STRONG", "EXTREME"]
+        _avail_buckets = sorted(mining_df["signal_bucket"].dropna().unique().tolist())
+        selected_buckets = st.multiselect(
+            "Filter by signal level",
+            options=_all_buckets,
+            default=_avail_buckets,
+        )
+        _view = mining_df[mining_df["signal_bucket"].isin(selected_buckets)].copy()
+
+        # ── Signal cards ───────────────────────────────────────────────────────
+        for _, sig in _view.iterrows():
+            sev  = int(sig.get("severity_score", 1))
+            lvl  = str(sig.get("signal_bucket", "WATCH"))
+            reg  = str(sig.get("region", ""))
+            cty  = str(sig.get("country", ""))
+            com  = str(sig.get("commodity", "")).title()
+            evt  = str(sig.get("event_summary", sig.get("event_type", "")))
+            bias = str(sig.get("trade_bias", "Long"))
+            supp = float(sig.get("supply_impact_pct", 0))
+            hdl  = str(sig.get("news_headline", ""))[:140]
+            src  = str(sig.get("news_source", ""))
+            trend_raw = str(sig.get("trend_direction", "new")).lower()
+
+            _level_colour = {
+                "WATCH": "🟡", "MODERATE": "🟠", "STRONG": "🔴", "EXTREME": "🚨"
+            }.get(lvl, "🟡")
+
+            _trend_display = {
+                "new":           "★ NEW",
+                "escalating":    "↑ ESCALATING",
+                "stable":        "→ STABLE",
+                "de-escalating": "↓ DE-ESCALATING",
+            }.get(trend_raw, trend_raw.upper())
+
+            _bias_icon = "📈 Long" if bias == "Long" else "📉 Short"
+
+            with st.expander(
+                f"{_level_colour} **{reg}** ({cty}) | {com} | {evt} | "
+                f"{_bias_icon} | Severity {sev}/10"
+            ):
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("Severity", f"{sev}/10")
+                col_b.metric("Global Supply at Risk", f"~{supp:.0f}%")
+                col_c.metric("Signal Level", f"{_level_colour} {lvl}")
+
+                st.markdown(f"**Trend:** {_trend_display}")
+                if hdl:
+                    st.markdown(f"**Latest headline:** *{hdl}*")
+                    if src:
+                        st.caption(f"Source: {src}")
+
+                # Stock recommendations
+                try:
+                    import json as _json
+                    stocks_raw = sig.get("affected_stocks")
+                    if isinstance(stocks_raw, str):
+                        stocks_data = _json.loads(stocks_raw)
+                    else:
+                        stocks_data = stocks_raw or {}
+                    long_stocks  = stocks_data.get("Long",  [])
+                    short_stocks = stocks_data.get("Short", [])
+                    if long_stocks:
+                        st.markdown(f"📈 **Long candidates:** {', '.join(long_stocks)}")
+                    if short_stocks:
+                        st.markdown(f"📉 **Short candidates:** {', '.join(short_stocks)}")
+                except Exception:
+                    pass
+
+        st.divider()
+
+        # ── Raw signals table ──────────────────────────────────────────────────
+        with st.expander("📋 All signals — raw table"):
+            _show_cols = [
+                "region", "country", "commodity", "event_type",
+                "severity_score", "supply_impact_pct", "signal_bucket",
+                "trade_bias", "trend_direction", "news_headline",
+                "news_source", "last_updated",
+            ]
+            st.dataframe(
+                _view[[c for c in _show_cols if c in _view.columns]],
+                use_container_width=True,
+            )
+
+        # ── Mining pulse table preview ─────────────────────────────────────────
+        with st.expander("📊 Mining recommendations (Pulse Trader view)"):
+            _m_pulse = build_mining_pulse_table(_view)
+            if not _m_pulse.empty:
+                _m_cols = ["Entry Gate", "Stock Trade", "Trade", "Region",
+                           "Commodity", "Severity Score", "Final Trade Score",
+                           "Why It Matters"]
+                _m_pulse["Entry Gate"] = _m_pulse.apply(_entry_gate, axis=1)
+                st.dataframe(
+                    _m_pulse[[c for c in _m_cols if c in _m_pulse.columns]],
+                    use_container_width=True,
+                )
+            else:
+                st.write("No tradeable signals from current filter.")
+
+    # ── Log mining recommendations ─────────────────────────────────────────────
+    st.divider()
+    st.subheader("📌 Log Mining Picks to Aftermath")
+    st.caption("Log current mining recommendations to track performance alongside weather picks.")
+
+    if not mining_df.empty:
+        _log_mining = st.button("📌 Log Mining Picks", type="primary")
+        if _log_mining:
+            try:
+                from recommendations_tracker import log_recommendations, ensure_schema
+                ensure_schema()
+                _m_pulse_log = build_mining_pulse_table(mining_df)
+                if not _m_pulse_log.empty:
+                    from recommendations_tracker import log_recommendations
+                    _n_logged = log_recommendations(_m_pulse_log, source="mining")
+                    if _n_logged:
+                        st.success(f"✅ Logged **{_n_logged}** mining recommendation(s) to Aftermath.")
+                    else:
+                        st.info("All current mining picks already logged (24h cooldown).")
+                else:
+                    st.warning("No tradeable mining signals to log.")
+            except Exception as _le:
+                st.error(f"Logging error: {_le}")
+
 
 with tab_media:
     st.header("📡 Media Signal Validation")
@@ -3380,7 +3614,7 @@ with tab_aftermath:
 
         # ── Colour-coded P&L table ────────────────────────────────────────────
         display_cols = [
-            "Date Logged", "Status", "Stock", "Trade", "Entry",
+            "Date Logged", "Source", "Status", "Stock", "Trade", "Entry",
             "Exit P&L", "Exit α SPY",        # actual close at media pickup
             "Day 0 P&L",
             "T+3 P&L",  "T+3 α SPY",
