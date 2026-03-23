@@ -3334,6 +3334,75 @@ with tab_mining:
                 st.error(f"Logging error: {_le}")
 
 
+# ─── Alt Data plain-English explanation helper ────────────────────────────────
+
+def _alt_plain_english(source: str, commodity: str, region: str,
+                        bias: str, sev: int, tix: list) -> str:
+    """Return a 2–3 sentence plain English trade thesis for an alt-data signal."""
+    com  = commodity.replace("_", " ").title() if commodity else "the commodity"
+    reg  = region or "the affected region"
+    tstr = ", ".join(tix[:4]) if tix else "related equities"
+    dir_ = "bullish" if bias == "long" else "bearish"
+    mov  = "upward" if bias == "long" else "downward"
+    urg  = ("Severity is high — consider acting quickly." if sev >= 7
+            else "Severity is moderate — monitor for escalation." if sev >= 4
+            else "Early-stage signal — keep on watch.")
+
+    if source == "nrc_incident":
+        return (
+            f"A U.S. Nuclear Regulatory Commission incident report was filed for an event "
+            f"in {reg}. NRC filings flag unplanned outages, safety events, or equipment "
+            f"failures at industrial and energy facilities — these can reduce {com} supply "
+            f"and push prices {mov}. Most exposed: {tstr}. {urg}"
+        )
+    elif source == "sec_8k":
+        return (
+            f"A company filed an SEC 8-K material disclosure linked to {com} operations "
+            f"in {reg}. 8-K filings must be submitted within 4 days of a major event — "
+            f"think mine closures, force majeure, or asset write-downs — giving you an "
+            f"early look before analysts react. This is {dir_} for {tstr}. {urg}"
+        )
+    elif source == "nasa_firms":
+        return (
+            f"NASA satellite data detected active fire in {reg}'s {com} production or "
+            f"infrastructure zone. Wildfires near commodity assets can disrupt output, "
+            f"damage transport routes, or force facility shutdowns — a {dir_} factor "
+            f"for {tstr}. This signal is {sev}/10 severity based on fire intensity and "
+            f"proximity to known assets. {urg}"
+        )
+    elif source == "gdelt_labor":
+        return (
+            f"GDELT global news monitoring detected labor unrest activity in {reg}'s "
+            f"{com} sector. Strike actions or work stoppages at mines, refineries, or "
+            f"ports create near-term supply disruptions and typically push {com} prices "
+            f"{mov}. The trade plays on {tstr}. {urg}"
+        )
+    elif source == "lme_warehouse":
+        drawdwn = bias == "short"
+        move    = "building" if drawdwn else "drawing down"
+        meaning = "oversupply — bearish" if drawdwn else "physical tightness — bullish"
+        return (
+            f"LME warehouse data shows {com} inventories are {move} in {reg}. "
+            f"Warehouse changes are a leading indicator of physical market conditions: "
+            f"this pattern signals {meaning} before futures prices typically respond. "
+            f"Affected: {tstr}. {urg}"
+        )
+    elif source == "usda_crops":
+        cond = "deteriorating" if bias == "long" else "improving"
+        imp  = "raising supply risk and input costs" if bias == "long" else "reducing supply risk"
+        return (
+            f"USDA crop progress data shows {com} conditions in {reg} are {cond} "
+            f"relative to seasonal norms, {imp}. This is a pre-harvest signal — "
+            f"crop stress shows up in USDA data weeks before it hits commodity prices "
+            f"or earnings guidance. Watch {tstr}. {urg}"
+        )
+    else:
+        return (
+            f"This signal indicates a {dir_} setup for {com} in {reg} based on "
+            f"alternative data monitoring. The event may affect {tstr}. {urg}"
+        )
+
+
 # ─── Alt Data tab ─────────────────────────────────────────────────────────────
 
 with tab_alt:
@@ -3485,8 +3554,23 @@ with tab_alt:
                 cb.metric("Signal",      f"{_lvl_icon.get(lvl, '')} {lvl}")
                 cc.metric("Source",      f"{_icon} {_lbl}")
 
-                if summary:
-                    st.markdown(f"**Summary:** {summary}")
+                # ── Plain-English trade thesis ──────────────────────────────
+                _explanation = _alt_plain_english(
+                    src, str(sig.get("commodity", "")), region, bias, sev, tix
+                )
+                st.markdown(
+                    f"<div style='"
+                    f"background:#1a2332;border-left:3px solid #3b82f6;"
+                    f"padding:10px 14px;border-radius:4px;margin:10px 0 6px 0;"
+                    f"font-size:13px;color:#cbd5e1;line-height:1.55'>"
+                    f"💡 <b style='color:#93c5fd'>What this means:</b><br>{_explanation}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                # ── Raw headline (collapsed) ─────────────────────────────────
+                if summary and summary not in ("nan", "None"):
+                    with st.expander("📄 Raw headline / summary", expanded=False):
+                        st.caption(summary)
                 if tix:
                     st.markdown(f"**Affected tickers:** `{'  ·  '.join(tix)}`")
                 if url and url != "None":
