@@ -25,6 +25,52 @@ def read_sql(query: str) -> pd.DataFrame:
         return pd.DataFrame(rows, columns=cols)
 
 
+# ── Cached DB readers (5-min TTL) — avoids re-hitting DB on every rerun ──────
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_alt_signals() -> pd.DataFrame:
+    try:
+        from alt_data_monitor import get_active_alt_signals
+        return get_active_alt_signals()
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_policy_signals(hours: int = 24) -> pd.DataFrame:
+    try:
+        from policy_monitor import get_recent_policy_signals
+        return get_recent_policy_signals(hours=hours)
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_mining_signals() -> pd.DataFrame:
+    try:
+        from mining_news_monitor import get_active_signals
+        return get_active_signals()
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _ensure_schemas() -> None:
+    """Run all schema migrations once per hour — not on every rerun."""
+    try:
+        from alt_data_monitor import ensure_alt_schema
+        ensure_alt_schema()
+    except Exception:
+        pass
+    try:
+        from policy_monitor import ensure_policy_schema
+        ensure_policy_schema()
+    except Exception:
+        pass
+    try:
+        from mining_news_monitor import ensure_mining_schema
+        ensure_mining_schema()
+    except Exception:
+        pass
+
+
 def is_missing(value) -> bool:
     if value is None:
         return True
@@ -2762,6 +2808,9 @@ worsening_count = int((df["trend_direction"] == "worsening").sum())
 new_count = int((df["trend_direction"] == "new").sum())
 anomaly_coverage = df["anomaly_type"].nunique()
 
+# ─── One-time schema check (cached 1h — not re-run on every rerun) ────────────
+_ensure_schemas()
+
 # ─── Tab layout ───────────────────────────────────────────────────────────────
 
 st.title("Global Weather Signal Dashboard")
@@ -3008,28 +3057,26 @@ with tab_pulse:
     if not weather_pulse.empty:
         weather_pulse.insert(0, "Source", "🌤️ Weather")
 
-    # ── Mining recommendations ─────────────────────────────────────────────────
+    # ── Mining recommendations (cached 5 min) ─────────────────────────────────
     try:
-        from mining_news_monitor import get_active_signals, build_mining_pulse_table
-        _mining_signals = get_active_signals()
+        from mining_news_monitor import build_mining_pulse_table
+        _mining_signals = _cached_mining_signals()
         mining_pulse = build_mining_pulse_table(_mining_signals)
     except Exception as _me:
         mining_pulse = pd.DataFrame()
-        st.caption(f"⚠️ Mining signals unavailable: {_me}")
 
-    # ── Alt-data recommendations ────────────────────────────────────────────────
+    # ── Alt-data recommendations (cached 5 min) ────────────────────────────────
     try:
-        from alt_data_monitor import get_active_alt_signals, build_alt_pulse_table
-        _alt_signals  = get_active_alt_signals()
-        alt_pulse     = build_alt_pulse_table(_alt_signals)
+        from alt_data_monitor import build_alt_pulse_table
+        _alt_signals = _cached_alt_signals()
+        alt_pulse    = build_alt_pulse_table(_alt_signals)
     except Exception as _ae:
         alt_pulse = pd.DataFrame()
-        st.caption(f"⚠️ Alt-data signals unavailable: {_ae}")
 
-    # ── Policy recommendations ─────────────────────────────────────────────────
+    # ── Policy recommendations (cached 5 min) ─────────────────────────────────
     try:
-        from policy_monitor import get_recent_policy_signals, build_policy_pulse_table
-        _policy_signals = get_recent_policy_signals(hours=24)
+        from policy_monitor import build_policy_pulse_table
+        _policy_signals = _cached_policy_signals(hours=24)
         policy_pulse    = build_policy_pulse_table(_policy_signals)
     except Exception as _pe:
         policy_pulse = pd.DataFrame()
@@ -3118,9 +3165,7 @@ with tab_mining:
         from mining_news_monitor import (
             get_active_signals, scan_all_regions,
             build_mining_pulse_table, deactivate_stale_signals,
-            ensure_mining_schema,
         )
-        ensure_mining_schema()
     except Exception as _me:
         st.error(f"Mining monitor import error: {_me}")
         st.stop()
@@ -3418,16 +3463,15 @@ with tab_alt:
         from alt_data_monitor import (
             get_active_alt_signals, scan_all_alt_data,
             build_alt_pulse_table, deactivate_stale_alt_signals,
-            ensure_alt_schema, _SOURCE_LABELS,
+            _SOURCE_LABELS,
         )
-        ensure_alt_schema()
     except Exception as _ae:
         st.error(f"Alt data monitor import error: {_ae}")
         st.stop()
 
     # ── Load from DB (no auto-scan — cron job keeps data fresh every 4h) ────────
     if "alt_signals_df" not in st.session_state:
-        st.session_state["alt_signals_df"] = get_active_alt_signals()
+        st.session_state["alt_signals_df"] = _cached_alt_signals()
         st.session_state["alt_scanned_at"] = "on load"
 
     # ── Controls ───────────────────────────────────────────────────────────────
@@ -3461,7 +3505,8 @@ with tab_alt:
                 st.warning(f"{_src_label}: {_se}")
         _scan_placeholder.empty()
         deactivate_stale_alt_signals(days=7)
-        st.session_state["alt_signals_df"] = get_active_alt_signals()
+        _cached_alt_signals.clear()   # invalidate cache after fresh scan
+        st.session_state["alt_signals_df"] = _cached_alt_signals()
         st.session_state["alt_scanned_at"] = pd.Timestamp.now().strftime("%H:%M:%S")
         _total = sum(_scan_results.values())
         if _total:
@@ -3471,7 +3516,8 @@ with tab_alt:
             st.info("No qualifying signals found. Check individual source warnings above.")
 
     if alt_refresh_clicked:
-        st.session_state["alt_signals_df"] = get_active_alt_signals()
+        _cached_alt_signals.clear()
+        st.session_state["alt_signals_df"] = _cached_alt_signals()
         st.session_state["alt_scanned_at"] = f"refreshed · {pd.Timestamp.now().strftime('%H:%M:%S')}"
 
     alt_df     = st.session_state.get("alt_signals_df", pd.DataFrame())
@@ -3615,16 +3661,15 @@ with tab_policy:
         from policy_monitor import (
             get_recent_policy_signals, scan_policy_statements,
             build_policy_pulse_table, deactivate_old_policy_signals,
-            ensure_policy_schema, SIGNAL_TRADE_MAP,
+            SIGNAL_TRADE_MAP,
         )
-        ensure_policy_schema()
     except Exception as _pe:
         st.error(f"Policy monitor import error: {_pe}")
         st.stop()
 
     # ── Load from DB (cron keeps it fresh every 15 min) ───────────────────────
     if "policy_signals_df" not in st.session_state:
-        st.session_state["policy_signals_df"] = get_recent_policy_signals(hours=24)
+        st.session_state["policy_signals_df"] = _cached_policy_signals(hours=24)
         st.session_state["policy_scanned_at"] = "on load"
 
     # ── Controls ───────────────────────────────────────────────────────────────
@@ -3639,7 +3684,8 @@ with tab_policy:
             try:
                 _n_pol = scan_policy_statements(lookback_minutes=60)
                 deactivate_old_policy_signals(hours=48)
-                st.session_state["policy_signals_df"] = get_recent_policy_signals(hours=24)
+                _cached_policy_signals.clear()
+                st.session_state["policy_signals_df"] = _cached_policy_signals(hours=24)
                 st.session_state["policy_scanned_at"] = pd.Timestamp.now().strftime("%H:%M:%S")
                 if _n_pol:
                     st.success(f"✅ Found **{_n_pol}** new policy signal(s).")
@@ -3649,7 +3695,8 @@ with tab_policy:
                 st.error(f"Scan error: {_pe}")
 
     if pol_refresh_btn:
-        st.session_state["policy_signals_df"] = get_recent_policy_signals(hours=24)
+        _cached_policy_signals.clear()
+        st.session_state["policy_signals_df"] = _cached_policy_signals(hours=24)
         st.session_state["policy_scanned_at"] = f"refreshed · {pd.Timestamp.now().strftime('%H:%M:%S')}"
 
     pol_df    = st.session_state.get("policy_signals_df", pd.DataFrame())
