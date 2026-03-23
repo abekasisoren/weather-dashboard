@@ -2767,8 +2767,8 @@ anomaly_coverage = df["anomaly_type"].nunique()
 st.title("Global Weather Signal Dashboard")
 st.caption("Early weather intelligence for markets ranked like a trading radar.")
 
-tab_radar, tab_pulse, tab_mining, tab_media, tab_aftermath = st.tabs([
-    "🌍 Radar", "📊 Pulse Trader", "⛏️ Mining Signals", "📡 Media Signals", "📈 Aftermath"
+tab_radar, tab_pulse, tab_mining, tab_alt, tab_media, tab_aftermath = st.tabs([
+    "🌍 Radar", "📊 Pulse Trader", "⛏️ Mining Signals", "🛰️ Alt Data", "📡 Media Signals", "📈 Aftermath"
 ])
 
 with tab_radar:
@@ -3016,11 +3016,20 @@ with tab_pulse:
         mining_pulse = pd.DataFrame()
         st.caption(f"⚠️ Mining signals unavailable: {_me}")
 
+    # ── Alt-data recommendations ────────────────────────────────────────────────
+    try:
+        from alt_data_monitor import get_active_alt_signals, build_alt_pulse_table
+        _alt_signals  = get_active_alt_signals()
+        alt_pulse     = build_alt_pulse_table(_alt_signals)
+    except Exception as _ae:
+        alt_pulse = pd.DataFrame()
+        st.caption(f"⚠️ Alt-data signals unavailable: {_ae}")
+
     # ── Combine ────────────────────────────────────────────────────────────────
-    pulse_parts = [t for t in [weather_pulse, mining_pulse] if not t.empty]
+    pulse_parts = [t for t in [weather_pulse, mining_pulse, alt_pulse] if not t.empty]
     if pulse_parts:
         pulse_table = pd.concat(pulse_parts, ignore_index=True, sort=False)
-        # Fill missing cols so both sources display cleanly
+        # Fill missing cols so all sources display cleanly
         for _col in ["Source", "Entry Gate", "Country", "Signal Bucket", "Supply Impact %", "Event Type"]:
             if _col not in pulse_table.columns:
                 pulse_table[_col] = ""
@@ -3037,8 +3046,10 @@ with tab_pulse:
     if pulse_table.empty:
         st.write("No recommendations right now.")
     else:
-        # Tabs within Pulse Trader for All / Weather only / Mining only
-        pt_all, pt_weather, pt_mining_tab = st.tabs(["All", "🌤️ Weather only", "⛏️ Mining only"])
+        # Tabs within Pulse Trader: All / Weather / Mining / Alt Data
+        pt_all, pt_weather, pt_mining_tab, pt_alt_tab = st.tabs([
+            "All", "🌤️ Weather only", "⛏️ Mining only", "🛰️ Alt Data only"
+        ])
 
         def _show_pulse(df: pd.DataFrame, label: str) -> None:
             if df.empty:
@@ -3068,6 +3079,12 @@ with tab_pulse:
             _show_pulse(
                 pulse_table[pulse_table["Source"] == "⛏️ Mining"].reset_index(drop=True),
                 "mining",
+            )
+
+        with pt_alt_tab:
+            _show_pulse(
+                pulse_table[pulse_table["Source"].str.startswith("🛰️", na=False)].reset_index(drop=True),
+                "alt data",
             )
 
 
@@ -3298,6 +3315,202 @@ with tab_mining:
                         st.info("All current mining picks already logged (24h cooldown).")
                 else:
                     st.warning("No tradeable mining signals to log.")
+            except Exception as _le:
+                st.error(f"Logging error: {_le}")
+
+
+# ─── Alt Data tab ─────────────────────────────────────────────────────────────
+
+with tab_alt:
+    st.header("🛰️ Alternative Data Signals")
+    st.caption(
+        "Six free real-time feeds that detect market-moving events **before** "
+        "financial media covers them: SEC 8-K filings, NASA satellite fires, "
+        "GDELT labor unrest, NRC industrial incidents, LME inventory drawdowns, "
+        "and USDA crop stress."
+    )
+
+    try:
+        from alt_data_monitor import (
+            get_active_alt_signals, scan_all_alt_data,
+            build_alt_pulse_table, deactivate_stale_alt_signals,
+            ensure_alt_schema, _SOURCE_LABELS,
+        )
+        ensure_alt_schema()
+    except Exception as _ae:
+        st.error(f"Alt data monitor import error: {_ae}")
+        st.stop()
+
+    # ── Staleness auto-scan (mirrors mining pattern) ───────────────────────────
+    _ALT_SCAN_INTERVAL_H = 4
+    if "alt_signals_df" not in st.session_state:
+        _alt_auto = False
+        try:
+            import psycopg as _psycopg_alt
+            _db_url = os.environ.get("DATABASE_URL")
+            if _db_url:
+                with _psycopg_alt.connect(_db_url) as _ac:
+                    _ar = _ac.execute(
+                        "SELECT MAX(last_updated) FROM alt_data_signals WHERE is_active = TRUE"
+                    ).fetchone()
+                _alt_last = _ar[0] if _ar and _ar[0] else None
+                if _alt_last is None:
+                    _alt_auto = True
+                else:
+                    _alt_now = pd.Timestamp.now(tz="UTC")
+                    _alt_ts  = (pd.Timestamp(_alt_last).tz_localize("UTC")
+                                if pd.Timestamp(_alt_last).tzinfo is None
+                                else pd.Timestamp(_alt_last))
+                    _alt_auto = (_alt_now - _alt_ts).total_seconds() / 3600 > _ALT_SCAN_INTERVAL_H
+        except Exception:
+            _alt_auto = False
+
+        if _alt_auto:
+            with st.spinner("🔄 Auto-scanning alt-data sources (stale > 4 h)…"):
+                try:
+                    scan_all_alt_data()
+                    deactivate_stale_alt_signals(days=7)
+                    st.session_state["alt_scanned_at"] = (
+                        f"auto · {pd.Timestamp.now().strftime('%H:%M:%S')}"
+                    )
+                except Exception:
+                    pass
+        else:
+            st.session_state["alt_scanned_at"] = "on load"
+
+        st.session_state["alt_signals_df"] = get_active_alt_signals()
+
+    # ── Controls ───────────────────────────────────────────────────────────────
+    a_c1, a_c2, a_c3 = st.columns([1, 1, 4])
+    alt_scan_clicked    = a_c1.button("🔍 Scan Now", key="alt_scan_btn", type="primary",
+                                      help="Run all 6 alt-data scanners now")
+    alt_refresh_clicked = a_c2.button("🔄 Refresh",  key="alt_refresh_btn",
+                                      help="Reload from DB without rescanning")
+
+    if alt_scan_clicked:
+        with st.spinner("Running 6 alt-data scanners…"):
+            try:
+                _alt_results = scan_all_alt_data()
+                deactivate_stale_alt_signals(days=7)
+                st.session_state["alt_signals_df"] = get_active_alt_signals()
+                st.session_state["alt_scanned_at"] = pd.Timestamp.now().strftime("%H:%M:%S")
+                _total = sum(_alt_results.values())
+                if _total:
+                    st.success(f"✅ Found / updated **{_total}** signal(s) across "
+                               f"{sum(1 for v in _alt_results.values() if v)} sources.")
+                else:
+                    st.info("No qualifying signals found this scan.")
+            except Exception as _ae:
+                st.error(f"Scan error: {_ae}")
+
+    if alt_refresh_clicked:
+        st.session_state["alt_signals_df"] = get_active_alt_signals()
+        st.session_state["alt_scanned_at"] = f"refreshed · {pd.Timestamp.now().strftime('%H:%M:%S')}"
+
+    alt_df     = st.session_state.get("alt_signals_df", pd.DataFrame())
+    alt_scan_t = st.session_state.get("alt_scanned_at", "—")
+    a_c3.caption(f"Last scan: **{alt_scan_t}**  |  {len(alt_df)} active signal(s)")
+
+    if alt_df.empty:
+        st.info(
+            "No active alt-data signals yet. Click **🔍 Scan Now** to run all sources, "
+            "or signals appear automatically every 4 hours via the scheduled scanner."
+        )
+    else:
+        # ── Summary metrics ────────────────────────────────────────────────────
+        _src_counts = alt_df["source"].value_counts()
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Active Signals",   len(alt_df))
+        a2.metric("Sources Active",   alt_df["source"].nunique())
+        a3.metric("Commodities",      alt_df["commodity"].nunique())
+        a4.metric("Strong / Extreme", int((alt_df["signal_level"] >= 3).sum()))
+
+        st.divider()
+
+        # ── Source + severity filters ──────────────────────────────────────────
+        _f1, _f2 = st.columns(2)
+        _all_sources = sorted(alt_df["source"].unique().tolist())
+        _sel_sources = _f1.multiselect(
+            "Filter by source",
+            options=_all_sources,
+            default=_all_sources,
+            format_func=lambda s: _SOURCE_LABELS.get(s, s),
+        )
+        _all_buckets = ["WATCH", "MODERATE", "STRONG", "EXTREME"]
+        _avail_bkts  = sorted(alt_df["signal_bucket"].dropna().unique().tolist())
+        _sel_bkts    = _f2.multiselect("Filter by level", options=_all_buckets, default=_avail_bkts)
+
+        _alt_view = alt_df[
+            alt_df["source"].isin(_sel_sources) & alt_df["signal_bucket"].isin(_sel_bkts)
+        ].copy()
+
+        # ── Signal cards ───────────────────────────────────────────────────────
+        _src_icons = {
+            "sec_8k":        "📋",
+            "nasa_firms":    "🔥",
+            "gdelt_labor":   "⚒️",
+            "nrc_incident":  "⚠️",
+            "lme_warehouse": "📦",
+            "usda_crops":    "🌾",
+        }
+        _lvl_icon = {"WATCH": "🟡", "MODERATE": "🟠", "STRONG": "🔴", "EXTREME": "🚨"}
+
+        for _, sig in _alt_view.iterrows():
+            sev    = int(sig.get("severity_score", 1))
+            src    = str(sig.get("source", ""))
+            lvl    = str(sig.get("signal_bucket", "WATCH"))
+            title  = str(sig.get("title", ""))
+            region = str(sig.get("region", ""))
+            com    = str(sig.get("commodity", "")).title()
+            bias   = str(sig.get("trade_bias", "long"))
+            url    = str(sig.get("url", ""))
+            summary = str(sig.get("summary", ""))
+
+            try:
+                tix = sig.get("affected_tickers")
+                if isinstance(tix, str):
+                    tix = json.loads(tix)
+                tix = tix or []
+            except Exception:
+                tix = []
+
+            _icon     = _src_icons.get(src, "🛰️")
+            _lbl      = _SOURCE_LABELS.get(src, src)
+            _bias_str = "📈 Long" if bias == "long" else "📉 Short"
+
+            with st.expander(
+                f"{_lvl_icon.get(lvl, '🟡')} **{title[:70]}**  |  "
+                f"{_lbl} · {region} · {com} · {_bias_str}"
+            ):
+                ca, cb, cc = st.columns(3)
+                ca.metric("Severity",    f"{sev}/10")
+                cb.metric("Signal",      f"{_lvl_icon.get(lvl, '')} {lvl}")
+                cc.metric("Source",      f"{_icon} {_lbl}")
+
+                if summary:
+                    st.markdown(f"**Summary:** {summary}")
+                if tix:
+                    st.markdown(f"**Affected tickers:** `{'  ·  '.join(tix)}`")
+                if url and url != "None":
+                    st.markdown(f"[🔗 View source]({url})")
+
+        st.divider()
+
+        # ── Log to Aftermath ───────────────────────────────────────────────────
+        st.subheader("📌 Log Alt-Data Picks to Aftermath")
+        if st.button("📌 Log Alt-Data Picks", type="primary", key="log_alt_btn"):
+            try:
+                from recommendations_tracker import log_recommendations, ensure_schema
+                ensure_schema()
+                _ap = build_alt_pulse_table(_alt_view)
+                if not _ap.empty:
+                    _n = log_recommendations(_ap, source="alt_data")
+                    if _n:
+                        st.success(f"✅ Logged **{_n}** alt-data pick(s) to Aftermath.")
+                    else:
+                        st.info("All current alt-data picks already logged (24h cooldown).")
+                else:
+                    st.warning("No tradeable alt-data signals to log.")
             except Exception as _le:
                 st.error(f"Logging error: {_le}")
 
