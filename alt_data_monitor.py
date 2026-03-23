@@ -499,9 +499,13 @@ def _scan_nrc_api() -> int:
         if not matched:
             continue
 
-        sev = min(10, 4 + (2 if qty > 10000 else 1 if qty > 1000 else 0)
-                       + (1 if "pipeline" in full else 0)
-                       + (1 if any(w in full for w in ["offshore", "gulf"]) else 0))
+        qty_pts  = 2 if qty > 10000 else 1 if qty > 1000 else 0
+        pipe_pts = 1 if "pipeline" in full else 0
+        gulf_pts = 1 if any(w in full for w in ["offshore", "gulf"]) else 0
+        sev = min(10, 4 + qty_pts + pipe_pts + gulf_pts)
+        score_basis = (
+            f"Base 4 + qty {qty_pts} + pipeline {pipe_pts} + offshore {gulf_pts}"
+        )
         dedup = f"nrc_{inc_no}"
         signal = {
             "source":           "nrc_incident",
@@ -514,7 +518,8 @@ def _scan_nrc_api() -> int:
             "severity_score":   sev,
             "trade_bias":       matched[3],
             "affected_tickers": matched[2],
-            "raw_data":         {"inc_no": inc_no, "material": mat, "qty": qty, "loc": loc},
+            "raw_data":         {"inc_no": inc_no, "material": mat, "qty": qty,
+                                 "loc": loc, "score_basis": score_basis},
             "dedup_key":        dedup,
         }
         if _upsert(signal):
@@ -523,14 +528,40 @@ def _scan_nrc_api() -> int:
     return n
 
 
+_NRC_INCIDENT_KEYWORDS = [
+    "spill", "leak", "rupture", "explosion", "fire", "release", "discharge",
+    "pipeline", "refinery", "chemical plant", "shutdown", "closure", "outage",
+    "accident", "incident", "hazmat", "evacuation", "containment",
+]
+
+def _nrc_gdelt_score(title: str) -> int:
+    """Score an NRC-fallback headline 1-10 based on keyword severity."""
+    t = title.lower()
+    score = 3  # base
+    # High-severity words
+    if any(w in t for w in ["explosion", "rupture", "blowout", "catastrophic"]):
+        score += 3
+    elif any(w in t for w in ["fire", "major spill", "large release", "emergency"]):
+        score += 2
+    elif any(w in t for w in ["spill", "leak", "release", "shutdown", "outage"]):
+        score += 1
+    # Infrastructure type
+    if any(w in t for w in ["pipeline", "offshore", "gulf"]):
+        score += 1
+    if any(w in t for w in ["refinery", "terminal", "export"]):
+        score += 1
+    return min(10, score)
+
+
 def _scan_nrc_via_gdelt() -> int:
-    """Fallback: find US industrial incidents via GDELT 24h scan."""
+    """Fallback: find US industrial incidents via GDELT — English sources only."""
     n, today = 0, _today_str()
+    # sourcelang:english ensures only English articles; domain filters add reliability
     queries = [
-        ("pipeline spill rupture United States",          "crude_oil",   ["KMI", "WMB"]),
-        ("refinery fire explosion United States",         "crude_oil",   ["VLO", "MPC", "PSX"]),
-        ("chemical plant explosion release United States","chemical",    ["DOW", "LYB"]),
-        ("ammonia release plant United States",           "fertilizer",  ["NTR", "MOS", "CF"]),
+        ("pipeline spill rupture sourcelang:english",          "crude_oil",   ["KMI", "WMB"]),
+        ("refinery fire explosion United States sourcelang:english", "crude_oil", ["VLO", "MPC", "PSX"]),
+        ("chemical plant explosion release United States sourcelang:english", "chemical", ["DOW", "LYB"]),
+        ("ammonia release plant United States sourcelang:english", "fertilizer", ["NTR", "MOS", "CF"]),
     ]
     for q_text, commodity, tickers in queries:
         q   = urllib.parse.quote(q_text)
@@ -541,6 +572,13 @@ def _scan_nrc_via_gdelt() -> int:
             continue
         for art in data.get("articles", [])[:2]:
             title = art.get("title", "")
+            if not title:
+                continue
+            # Hard filter: must contain at least one incident keyword in English
+            t_lower = title.lower()
+            if not any(kw in t_lower for kw in _NRC_INCIDENT_KEYWORDS):
+                continue
+            sev   = _nrc_gdelt_score(title)
             dedup = f"nrc_gdelt_{abs(hash(title)) % 999983}_{today}"
             signal = {
                 "source":           "nrc_incident",
@@ -550,10 +588,10 @@ def _scan_nrc_via_gdelt() -> int:
                 "url":              art.get("url", ""),
                 "region":           "United States",
                 "commodity":        commodity,
-                "severity_score":   5,
+                "severity_score":   sev,
                 "trade_bias":       "short",
                 "affected_tickers": tickers,
-                "raw_data":         {"headline": title},
+                "raw_data":         {"headline": title, "score_basis": "gdelt_keyword_match"},
                 "dedup_key":        dedup,
             }
             if _upsert(signal):
