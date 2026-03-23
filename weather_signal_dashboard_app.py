@@ -2767,8 +2767,9 @@ anomaly_coverage = df["anomaly_type"].nunique()
 st.title("Global Weather Signal Dashboard")
 st.caption("Early weather intelligence for markets ranked like a trading radar.")
 
-tab_radar, tab_pulse, tab_mining, tab_alt, tab_media, tab_aftermath = st.tabs([
-    "🌍 Radar", "📊 Pulse Trader", "⛏️ Mining Signals", "🛰️ Alt Data", "📡 Media Signals", "📈 Aftermath"
+tab_radar, tab_pulse, tab_mining, tab_alt, tab_policy, tab_media, tab_aftermath = st.tabs([
+    "🌍 Radar", "📊 Pulse Trader", "⛏️ Mining Signals",
+    "🛰️ Alt Data", "🏛️ Policy Monitor", "📡 Media Signals", "📈 Aftermath"
 ])
 
 with tab_radar:
@@ -3025,8 +3026,16 @@ with tab_pulse:
         alt_pulse = pd.DataFrame()
         st.caption(f"⚠️ Alt-data signals unavailable: {_ae}")
 
+    # ── Policy recommendations ─────────────────────────────────────────────────
+    try:
+        from policy_monitor import get_recent_policy_signals, build_policy_pulse_table
+        _policy_signals = get_recent_policy_signals(hours=24)
+        policy_pulse    = build_policy_pulse_table(_policy_signals)
+    except Exception as _pe:
+        policy_pulse = pd.DataFrame()
+
     # ── Combine ────────────────────────────────────────────────────────────────
-    pulse_parts = [t for t in [weather_pulse, mining_pulse, alt_pulse] if not t.empty]
+    pulse_parts = [t for t in [weather_pulse, mining_pulse, alt_pulse, policy_pulse] if not t.empty]
     if pulse_parts:
         pulse_table = pd.concat(pulse_parts, ignore_index=True, sort=False)
         # Fill missing cols so all sources display cleanly
@@ -3046,9 +3055,9 @@ with tab_pulse:
     if pulse_table.empty:
         st.write("No recommendations right now.")
     else:
-        # Tabs within Pulse Trader: All / Weather / Mining / Alt Data
-        pt_all, pt_weather, pt_mining_tab, pt_alt_tab = st.tabs([
-            "All", "🌤️ Weather only", "⛏️ Mining only", "🛰️ Alt Data only"
+        # Tabs within Pulse Trader: All / Weather / Mining / Alt Data / Policy
+        pt_all, pt_weather, pt_mining_tab, pt_alt_tab, pt_policy_tab = st.tabs([
+            "All", "🌤️ Weather only", "⛏️ Mining only", "🛰️ Alt Data only", "🏛️ Policy only"
         ])
 
         def _show_pulse(df: pd.DataFrame, label: str) -> None:
@@ -3085,6 +3094,12 @@ with tab_pulse:
             _show_pulse(
                 pulse_table[pulse_table["Source"].str.startswith("🛰️", na=False)].reset_index(drop=True),
                 "alt data",
+            )
+
+        with pt_policy_tab:
+            _show_pulse(
+                pulse_table[pulse_table["Source"] == "🏛️ Policy"].reset_index(drop=True),
+                "policy",
             )
 
 
@@ -3494,6 +3509,184 @@ with tab_alt:
                         st.info("All current alt-data picks already logged (24h cooldown).")
                 else:
                     st.warning("No tradeable alt-data signals to log.")
+            except Exception as _le:
+                st.error(f"Logging error: {_le}")
+
+
+# ─── Policy Monitor tab ───────────────────────────────────────────────────────
+
+with tab_policy:
+    st.header("🏛️ Policy Monitor")
+    st.caption(
+        "Scans GDELT every 15 minutes for market-moving statements by "
+        "**45 central bank governors and finance ministers** across all major economies. "
+        "Classifies tone as hawkish 🦅, dovish 🕊️, trade war ⚔️, stimulus 💰, "
+        "stability risk 🚨, currency move 💱, or sanctions 🔒 — then maps to tickers."
+    )
+
+    try:
+        from policy_monitor import (
+            get_recent_policy_signals, scan_policy_statements,
+            build_policy_pulse_table, deactivate_old_policy_signals,
+            ensure_policy_schema, SIGNAL_TRADE_MAP,
+        )
+        ensure_policy_schema()
+    except Exception as _pe:
+        st.error(f"Policy monitor import error: {_pe}")
+        st.stop()
+
+    # ── Load from DB (cron keeps it fresh every 15 min) ───────────────────────
+    if "policy_signals_df" not in st.session_state:
+        st.session_state["policy_signals_df"] = get_recent_policy_signals(hours=24)
+        st.session_state["policy_scanned_at"] = "on load"
+
+    # ── Controls ───────────────────────────────────────────────────────────────
+    p_c1, p_c2, p_c3 = st.columns([1, 1, 4])
+    pol_scan_btn    = p_c1.button("🔍 Scan Now",  key="pol_scan_btn",  type="primary",
+                                   help="Scan all 45 officials for the last 60 min (~30s)")
+    pol_refresh_btn = p_c2.button("🔄 Refresh",   key="pol_refresh_btn",
+                                   help="Reload from DB without rescanning")
+
+    if pol_scan_btn:
+        with st.spinner("Scanning 45 officials across GDELT…"):
+            try:
+                _n_pol = scan_policy_statements(lookback_minutes=60)
+                deactivate_old_policy_signals(hours=48)
+                st.session_state["policy_signals_df"] = get_recent_policy_signals(hours=24)
+                st.session_state["policy_scanned_at"] = pd.Timestamp.now().strftime("%H:%M:%S")
+                if _n_pol:
+                    st.success(f"✅ Found **{_n_pol}** new policy signal(s).")
+                else:
+                    st.info("No market-relevant statements detected in last 60 min.")
+            except Exception as _pe:
+                st.error(f"Scan error: {_pe}")
+
+    if pol_refresh_btn:
+        st.session_state["policy_signals_df"] = get_recent_policy_signals(hours=24)
+        st.session_state["policy_scanned_at"] = f"refreshed · {pd.Timestamp.now().strftime('%H:%M:%S')}"
+
+    pol_df    = st.session_state.get("policy_signals_df", pd.DataFrame())
+    pol_scan_t = st.session_state.get("policy_scanned_at", "—")
+    p_c3.caption(f"Last scan: **{pol_scan_t}**  |  {len(pol_df)} signal(s) (24h)")
+
+    if pol_df.empty:
+        st.info(
+            "No policy signals yet. Click **🔍 Scan Now** to scan the last 60 minutes, "
+            "or signals appear automatically every 15 minutes via the scheduled cron job."
+        )
+    else:
+        # ── Summary metrics ────────────────────────────────────────────────────
+        _sig_icons = {
+            "hawkish":        "🦅 Hawkish",
+            "dovish":         "🕊️ Dovish",
+            "trade_war":      "⚔️ Trade War",
+            "stimulus":       "💰 Stimulus",
+            "stability_risk": "🚨 Stability Risk",
+            "currency_move":  "💱 Currency Move",
+            "sanctions":      "🔒 Sanctions",
+        }
+        pm1, pm2, pm3, pm4 = st.columns(4)
+        pm1.metric("Signals (24h)",      len(pol_df))
+        pm2.metric("Officials Active",   pol_df["official_name"].nunique())
+        pm3.metric("Countries",          pol_df["country"].nunique())
+        pm4.metric("High Score (≥7)",    int((pol_df["sentiment_score"] >= 7).sum()))
+
+        st.divider()
+
+        # ── Type filter ────────────────────────────────────────────────────────
+        _avail_types = sorted(pol_df["signal_type"].dropna().unique().tolist())
+        _sel_types = st.multiselect(
+            "Filter by signal type",
+            options=list(_sig_icons.keys()),
+            default=_avail_types,
+            format_func=lambda s: _sig_icons.get(s, s),
+        )
+        _pol_view = pol_df[pol_df["signal_type"].isin(_sel_types)].copy()
+
+        # ── Signal cards ───────────────────────────────────────────────────────
+        _type_colours = {
+            "hawkish":        "#7f1d1d",   # dark red
+            "dovish":         "#14532d",   # dark green
+            "trade_war":      "#431407",   # dark orange
+            "stimulus":       "#1e3a5f",   # dark blue
+            "stability_risk": "#4a044e",   # dark purple
+            "currency_move":  "#1c1917",   # dark stone
+            "sanctions":      "#1e1b4b",   # dark indigo
+        }
+        _type_border = {
+            "hawkish":        "#ef4444",
+            "dovish":         "#22c55e",
+            "trade_war":      "#f97316",
+            "stimulus":       "#3b82f6",
+            "stability_risk": "#a855f7",
+            "currency_move":  "#a8a29e",
+            "sanctions":      "#6366f1",
+        }
+
+        for _, sig in _pol_view.iterrows():
+            stype   = str(sig.get("signal_type", ""))
+            sev     = int(sig.get("sentiment_score", 1))
+            name    = str(sig.get("official_name", ""))
+            title   = str(sig.get("official_title", ""))
+            country = str(sig.get("country", ""))
+            headline = str(sig.get("headline", ""))
+            matched = str(sig.get("keywords_matched", ""))
+            url     = str(sig.get("url", ""))
+            pub     = str(sig.get("published_at", ""))[:16]
+
+            try:
+                long_t  = json.loads(sig.get("long_tickers",  "[]") or "[]")
+                short_t = json.loads(sig.get("short_tickers", "[]") or "[]")
+            except Exception:
+                long_t, short_t = [], []
+
+            icon  = _sig_icons.get(stype, f"🏛️ {stype}")
+            bg    = _type_colours.get(stype, "#1c1917")
+            border = _type_border.get(stype, "#6b7280")
+            trade_info = SIGNAL_TRADE_MAP.get(stype, {})
+
+            with st.expander(
+                f"{icon} | **{name}** ({title}, {country}) | Score {sev}/10 | {pub}"
+            ):
+                # Coloured signal banner
+                st.markdown(
+                    f'<div style="padding:8px 12px; background:{bg}; '
+                    f'border-left:3px solid {border}; border-radius:4px; margin-bottom:8px;">'
+                    f'<span style="font-size:11px; font-weight:700; color:#f1f5f9;">'
+                    f'{icon} &nbsp; {stype.replace("_", " ").upper()}</span></div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(f"**Headline:** {headline}")
+                st.caption(f"Keywords matched: `{matched}`")
+
+                c1, c2 = st.columns(2)
+                if long_t:
+                    c1.markdown(f"📈 **Long:** `{'  ·  '.join(long_t)}`")
+                if short_t:
+                    c2.markdown(f"📉 **Short:** `{'  ·  '.join(short_t)}`")
+
+                if trade_info.get("rationale"):
+                    st.caption(f"💡 {trade_info['rationale']}")
+
+                if url and url != "None":
+                    st.markdown(f"[🔗 Read article]({url})")
+
+        st.divider()
+
+        # ── Log to Aftermath ───────────────────────────────────────────────────
+        if st.button("📌 Log Policy Picks to Aftermath", type="primary", key="log_policy_btn"):
+            try:
+                from recommendations_tracker import log_recommendations, ensure_schema
+                ensure_schema()
+                _pp = build_policy_pulse_table(_pol_view)
+                if not _pp.empty:
+                    _n = log_recommendations(_pp, source="policy")
+                    if _n:
+                        st.success(f"✅ Logged **{_n}** policy pick(s) to Aftermath.")
+                    else:
+                        st.info("All current policy picks already logged (24h cooldown).")
+                else:
+                    st.warning("No tradeable policy signals to log.")
             except Exception as _le:
                 st.error(f"Logging error: {_le}")
 
