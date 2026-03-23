@@ -3093,6 +3093,46 @@ with tab_mining:
         st.error(f"Mining monitor import error: {_me}")
         st.stop()
 
+    # ── Staleness auto-scan (first load or stale > 2 h) ───────────────────────
+    # The Render cron job scans every 2 hours; the dashboard mirrors that here
+    # so local/dev sessions also stay current without manual intervention.
+    _AUTO_SCAN_INTERVAL_H = 2
+    if "mining_signals_df" not in st.session_state:
+        _auto_scan_triggered = False
+        try:
+            import psycopg as _psycopg2
+            _db_url = os.environ.get("DATABASE_URL")
+            if _db_url:
+                with _psycopg2.connect(_db_url) as _chk:
+                    _chk_row = _chk.execute(
+                        "SELECT MAX(last_updated) FROM mining_signals WHERE is_active = TRUE"
+                    ).fetchone()
+                _last_db_ts = _chk_row[0] if _chk_row and _chk_row[0] else None
+                if _last_db_ts is None:
+                    _auto_scan_triggered = True   # table empty
+                else:
+                    _now_utc  = pd.Timestamp.now(tz="UTC")
+                    _last_ts  = pd.Timestamp(_last_db_ts).tz_localize("UTC") if pd.Timestamp(_last_db_ts).tzinfo is None else pd.Timestamp(_last_db_ts)
+                    _age_h    = (_now_utc - _last_ts).total_seconds() / 3600
+                    _auto_scan_triggered = _age_h > _AUTO_SCAN_INTERVAL_H
+        except Exception:
+            _auto_scan_triggered = False
+
+        if _auto_scan_triggered:
+            with st.spinner("🔄 Auto-scanning mining regions (signals stale > 2 h)…"):
+                try:
+                    _n = scan_all_regions()
+                    deactivate_stale_signals(days=7)
+                    st.session_state["mining_scanned_at"] = (
+                        f"auto · {pd.Timestamp.now().strftime('%H:%M:%S')}"
+                    )
+                except Exception:
+                    pass
+        else:
+            st.session_state["mining_scanned_at"] = "on load"
+
+        st.session_state["mining_signals_df"] = get_active_signals()
+
     # ── Scan controls ──────────────────────────────────────────────────────────
     m_c1, m_c2, m_c3 = st.columns([1, 1, 4])
     scan_clicked    = m_c1.button("🔍 Scan Now", type="primary",
@@ -3114,9 +3154,9 @@ with tab_mining:
             except Exception as _e:
                 st.error(f"Scan error: {_e}")
 
-    if refresh_clicked or "mining_signals_df" not in st.session_state:
+    if refresh_clicked:
         st.session_state["mining_signals_df"] = get_active_signals()
-        st.session_state["mining_scanned_at"] = "on load"
+        st.session_state["mining_scanned_at"] = f"refreshed · {pd.Timestamp.now().strftime('%H:%M:%S')}"
 
     mining_df    = st.session_state.get("mining_signals_df", pd.DataFrame())
     scanned_at   = st.session_state.get("mining_scanned_at", "—")

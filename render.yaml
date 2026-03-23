@@ -24,3 +24,22 @@ services:
           property: connectionString
       - key: NEWSAPI_KEY
         sync: false   # inherits from dashboard service env vars
+
+  # ── Mining news scanner — runs every 2 hours to detect supply disruptions ──
+  # Scans GDELT, Google News RSS, Bing RSS, NewsAPI for events at 20+ global
+  # mining regions. Writes scored signals to the `mining_signals` DB table.
+  - type: cron
+    name: mining-news-scanner
+    runtime: python
+    plan: free
+    schedule: "0 */2 * * *"   # every 2 hours: 00:00, 02:00, 04:00 … UTC
+    buildCommand: pip install -r requirements.txt
+    startCommand: python mining_news_monitor.py
+    envVars:
+      - key: DATABASE_URL
+        fromService:
+          type: web
+          name: weather-dashboard
+          property: connectionString
+      - key: NEWSAPI_KEY
+        sync: false   # inherits from dashboard service env vars
