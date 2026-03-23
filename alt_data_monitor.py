@@ -243,7 +243,7 @@ def scan_sec_edgar(lookback_days: int = 3) -> int:
         q   = urllib.parse.quote(f'"{kw}"')
         url = (f"https://efts.sec.gov/LATEST/search-index?q={q}"
                f"&dateRange=custom&startdt={start}&enddt={end}&forms=8-K")
-        data = _fetch_json(url)
+        data = _fetch_json(url, timeout=10)
         if not data:
             continue
 
@@ -312,14 +312,16 @@ FIRMS_ZONES = [
 
 def scan_nasa_firms() -> int:
     """
-    Download VIIRS 7-day global fire CSV (no auth) and count high-confidence
-    fire pixels inside each commodity zone.
+    Download VIIRS 24h global fire CSV (no auth, ~5 MB) and count
+    high-confidence fire pixels inside each commodity zone.
+    Uses the 24h file (not 7d) to keep downloads fast for cron/manual runs.
     """
+    # 24h file is ~5 MB vs ~100 MB for the 7d global file
     url = ("https://firms.modaps.eosdis.nasa.gov/data/active_fire"
-           "/viirs-i/csv/VIIRS_I_Global_7d.csv")
+           "/viirs-i/csv/VIIRS_I_Global_24h.csv")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "weather-trading-radar"})
-        with urllib.request.urlopen(req, timeout=90) as r:
+        with urllib.request.urlopen(req, timeout=30) as r:
             raw = r.read().decode("utf-8")
     except Exception as e:
         print(f"  [FIRMS] download error: {e}")
@@ -411,7 +413,7 @@ def scan_gdelt_labor() -> int:
         )
         url = (f"https://api.gdeltproject.org/api/v2/doc/doc"
                f"?query={q}&mode=artlist&maxrecords=10&timespan=3d&format=json")
-        data = _fetch_json(url)
+        data = _fetch_json(url, timeout=8)
         if not data:
             continue
 
