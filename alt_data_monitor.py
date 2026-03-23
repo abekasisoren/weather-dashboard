@@ -797,7 +797,7 @@ def build_alt_pulse_table(signals_df: pd.DataFrame) -> pd.DataFrame:
         for ticker in (tix[:5] if tix else ["—"]):
             rows.append({
                 "Source":           f"🛰️ {source_lbl}",
-                "Stock":            ticker,
+                "Stock Trade":      ticker,   # matches Pulse Trader column name
                 "Region":           str(sig.get("region", "")),
                 "Anomaly":          str(sig.get("signal_type", "")),
                 "Commodity":        str(sig.get("commodity", "")).title(),
@@ -808,14 +808,14 @@ def build_alt_pulse_table(signals_df: pd.DataFrame) -> pd.DataFrame:
                 "Entry Gate":       ("🟢 Enter — Escalating" if sev >= 7
                                      else "🟡 Monitor" if sev >= 5
                                      else "🔴 Avoid — Fading"),
-                "Headline":         str(sig.get("title", ""))[:80],
+                "Why It Matters":   str(sig.get("title", ""))[:100],  # matches Pulse Trader column
             })
 
     if not rows:
         return pd.DataFrame()
 
     return (pd.DataFrame(rows)
-              .drop_duplicates(subset=["Source", "Stock", "Anomaly"])
+              .drop_duplicates(subset=["Source", "Stock Trade", "Anomaly"])
               .reset_index(drop=True))
 
 
