@@ -25,6 +25,28 @@ services:
       - key: NEWSAPI_KEY
         sync: false   # inherits from dashboard service env vars
 
+  # ── Alt-data scanner — runs every 4 hours ─────────────────────────────────
+  # Sources: SEC EDGAR 8-K (no key), NASA FIRMS fires (no key),
+  #          GDELT labor unrest (no key), NRC incidents (no key),
+  #          LME warehouse (NASDAQ key optional), USDA crops (USDA key optional)
+  - type: cron
+    name: alt-data-scanner
+    runtime: python
+    plan: free
+    schedule: "0 */4 * * *"   # 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
+    buildCommand: pip install -r requirements.txt
+    startCommand: python alt_data_monitor.py
+    envVars:
+      - key: DATABASE_URL
+        fromService:
+          type: web
+          name: weather-dashboard
+          property: connectionString
+      - key: NASDAQ_DATA_LINK_KEY
+        sync: false   # optional — enables LME warehouse scanner
+      - key: USDA_NASS_KEY
+        sync: false   # optional — enables USDA crop progress scanner
+
   # ── Mining news scanner — runs every 2 hours to detect supply disruptions ──
   # Scans GDELT, Google News RSS, Bing RSS, NewsAPI for events at 20+ global
   # mining regions. Writes scored signals to the `mining_signals` DB table.
