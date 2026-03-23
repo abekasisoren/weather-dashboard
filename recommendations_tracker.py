@@ -27,6 +27,11 @@ import psycopg
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+# ─── Position management thresholds ──────────────────────────────────────────
+# These can be overridden from the dashboard sidebar via close_positions_stop_loss()
+STOP_LOSS_PCT   = 5.0   # close Long if price drops 5%+ below entry; Short if rises 5%+
+TAKE_PROFIT_PCT = 10.0  # close Long if price rises 10%+; Short if drops 10%+
+
 
 # ─── Schema ───────────────────────────────────────────────────────────────────
 
@@ -465,6 +470,277 @@ def close_positions_from_media() -> int:
     return closed_count
 
 
+# ─── Weather-resolution close ─────────────────────────────────────────────────
+
+def close_positions_weather_resolved(min_recovering_runs: int = 2) -> int:
+    """
+    Close open positions whose underlying weather event is measurably fading in
+    the GRIB data — BEFORE media has a chance to report it.
+
+    Detection: the most recent `min_recovering_runs` GRIB rows for a
+    (region, anomaly_type) pair all carry trend_direction = 'recovering'.
+    Two consecutive recovering runs confirms the event is genuinely retreating,
+    not a single-model wobble.
+
+    Uses REGION + ANOMALY family matching so "Brazil / heavy_rain recovering"
+    closes "Brazil Center-South / flood_risk" positions.
+
+    close_reason = 'weather_resolved'
+    Returns number of positions newly closed.
+    """
+    if not DATABASE_URL:
+        return 0
+
+    # ── Step 1: Find events with N consecutive recovering GRIB runs ────────────
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH ranked AS (
+                        SELECT
+                            region,
+                            anomaly_type,
+                            trend_direction,
+                            created_at,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY region, anomaly_type
+                                ORDER BY created_at DESC
+                            ) AS rn
+                        FROM weather_global_shocks
+                        WHERE trend_direction IS NOT NULL
+                    ),
+                    recent AS (
+                        SELECT
+                            region,
+                            anomaly_type,
+                            MAX(created_at) AS latest_at,
+                            COUNT(*) FILTER (WHERE trend_direction = 'recovering') AS recovering_count,
+                            COUNT(*)                                               AS run_count
+                        FROM ranked
+                        WHERE rn <= %s
+                        GROUP BY region, anomaly_type
+                    )
+                    SELECT region, anomaly_type, latest_at::date AS resolved_date
+                    FROM recent
+                    WHERE recovering_count >= %s
+                      AND run_count        >= %s
+                    """,
+                    (min_recovering_runs, min_recovering_runs, min_recovering_runs),
+                )
+                resolved_events = cur.fetchall()
+    except Exception as e:
+        print(f"[close_positions_weather_resolved] DB error step 1: {e}")
+        return 0
+
+    if not resolved_events:
+        print("[close_positions_weather_resolved] No resolving events found.")
+        return 0
+
+    print(
+        f"[close_positions_weather_resolved] {len(resolved_events)} resolving event(s) detected"
+    )
+
+    # ── Step 2: Expand to region+anomaly families, find open recommendations ───
+    to_close: list[tuple] = []
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                for region, anomaly_type, resolved_date in resolved_events:
+                    r_family = _CLOSE_REGION_FAMILY.get(region, frozenset({region}))
+                    a_family = _CLOSE_ANOMALY_FAMILY.get(anomaly_type, frozenset({anomaly_type}))
+                    region_list  = sorted(r_family)
+                    anomaly_list = sorted(a_family)
+
+                    print(
+                        f"[close_positions_weather_resolved] {region}/{anomaly_type} "
+                        f"resolving → searching {region_list} × {anomaly_list}"
+                    )
+
+                    cur.execute(
+                        """
+                        SELECT id, stock_symbol, trade, entry_price, spy_entry
+                        FROM recommendations_log
+                        WHERE region    = ANY(%s)
+                          AND anomaly   = ANY(%s)
+                          AND closed_at IS NULL
+                          AND logged_at::date <= %s
+                        """,
+                        (region_list, anomaly_list, resolved_date),
+                    )
+                    rows = cur.fetchall()
+                    print(
+                        f"[close_positions_weather_resolved]   → {len(rows)} position(s) to close"
+                    )
+                    for row in rows:
+                        to_close.append((*row, resolved_date))
+    except Exception as e:
+        print(f"[close_positions_weather_resolved] DB error step 2: {e}")
+        return 0
+
+    if not to_close:
+        print("[close_positions_weather_resolved] Nothing to close.")
+        return 0
+
+    # ── Step 3: Fetch Yahoo Finance prices at resolved_date (best effort) ──────
+    fetch_ranges: dict[str, tuple[date, date]] = {}
+
+    def _ext(sym: str, d: date) -> None:
+        lo, hi = fetch_ranges.get(sym, (d, d))
+        fetch_ranges[sym] = (min(lo, d), max(hi, d))
+
+    for rec_id, symbol, trade, entry_p, spy_entry, resolved_date in to_close:
+        _ext(symbol, resolved_date)
+        _ext("SPY",  resolved_date)
+
+    histories: dict[str, dict[date, float]] = {}
+    for sym, (lo, hi) in fetch_ranges.items():
+        histories[sym] = _yahoo_history_range(sym, lo - timedelta(days=5), hi + timedelta(days=2))
+
+    # ── Step 4: Write close records (always, even if price unavailable) ─────────
+    closed_count = 0
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                for rec_id, symbol, trade, entry_p, spy_entry, resolved_date in to_close:
+                    exit_p   = _closest_price_on_or_before(histories.get(symbol, {}), resolved_date)
+                    spy_exit = _closest_price_on_or_before(histories.get("SPY",   {}), resolved_date)
+
+                    closed_ts = datetime.combine(resolved_date, datetime.min.time()).replace(
+                        tzinfo=timezone.utc
+                    )
+                    cur.execute(
+                        """
+                        UPDATE recommendations_log
+                        SET closed_at      = %s,
+                            exit_price     = %s,
+                            spy_exit_price = %s,
+                            close_reason   = 'weather_resolved'
+                        WHERE id = %s AND closed_at IS NULL
+                        """,
+                        (closed_ts, exit_p, spy_exit, rec_id),
+                    )
+                    price_str = f"${exit_p:.2f}" if exit_p else "N/A"
+                    print(
+                        f"[close_positions_weather_resolved]   ✓ Closed #{rec_id} "
+                        f"{symbol} exit={price_str} resolved={resolved_date}"
+                    )
+                    closed_count += 1
+            conn.commit()
+    except Exception as e:
+        print(f"[close_positions_weather_resolved] DB error step 4: {e}")
+
+    print(f"[close_positions_weather_resolved] Done — {closed_count} position(s) closed.")
+    return closed_count
+
+
+# ─── Stop-loss / take-profit close ────────────────────────────────────────────
+
+def close_positions_stop_loss(
+    stop_loss_pct: float = STOP_LOSS_PCT,
+    take_profit_pct: float = TAKE_PROFIT_PCT,
+) -> int:
+    """
+    Close open positions that have hit a price-based threshold.
+
+    Thresholds (configurable, see module constants):
+      Long  + price falls stop_loss_pct%  below entry → close_reason = 'stop_loss'
+      Short + price rises stop_loss_pct%  above entry → close_reason = 'stop_loss'
+      Long  + price rises take_profit_pct% above entry → close_reason = 'take_profit'
+      Short + price falls take_profit_pct% below entry → close_reason = 'take_profit'
+
+    Uses live Finnhub prices.  Positions with no entry price or no live quote
+    are skipped silently.
+
+    Returns number of positions newly closed.
+    """
+    if not DATABASE_URL:
+        return 0
+
+    # ── Fetch all open positions that have an entry price ──────────────────────
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, stock_symbol, trade, entry_price, spy_entry
+                    FROM recommendations_log
+                    WHERE closed_at   IS NULL
+                      AND entry_price IS NOT NULL
+                      AND entry_price  > 0
+                    """
+                )
+                open_positions = cur.fetchall()
+    except Exception as e:
+        print(f"[close_positions_stop_loss] DB error fetching open positions: {e}")
+        return 0
+
+    if not open_positions:
+        return 0
+
+    # ── Fetch live prices (Finnhub) ────────────────────────────────────────────
+    symbols = list({row[1] for row in open_positions} | {"SPY"})
+    live_prices = fetch_prices(symbols)
+    spy_price   = live_prices.get("SPY")
+    now_ts      = datetime.now(timezone.utc)
+
+    triggers: list[tuple] = []  # (rec_id, symbol, trade, entry_p, exit_p, spy_exit, reason)
+
+    for rec_id, symbol, trade, entry_p, spy_entry in open_positions:
+        current_p = live_prices.get(symbol)
+        if current_p is None or entry_p is None or entry_p == 0:
+            continue
+
+        if trade == "Long":
+            pnl_pct = (current_p - entry_p) / entry_p * 100
+        elif trade == "Short":
+            pnl_pct = (entry_p - current_p) / entry_p * 100
+        else:
+            continue
+
+        if pnl_pct <= -stop_loss_pct:
+            close_reason = "stop_loss"
+        elif pnl_pct >= take_profit_pct:
+            close_reason = "take_profit"
+        else:
+            continue  # within thresholds — hold
+
+        triggers.append((rec_id, symbol, trade, entry_p, current_p, spy_price, close_reason))
+        print(
+            f"[close_positions_stop_loss]   {close_reason.upper()} #{rec_id} "
+            f"{symbol} {trade} entry={entry_p:.2f} now={current_p:.2f} pnl={pnl_pct:+.1f}%"
+        )
+
+    if not triggers:
+        print("[close_positions_stop_loss] No stop-loss or take-profit triggers.")
+        return 0
+
+    # ── Write close records ────────────────────────────────────────────────────
+    closed_count = 0
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                for rec_id, symbol, trade, entry_p, exit_p, spy_exit, close_reason in triggers:
+                    cur.execute(
+                        """
+                        UPDATE recommendations_log
+                        SET closed_at      = %s,
+                            exit_price     = %s,
+                            spy_exit_price = %s,
+                            close_reason   = %s
+                        WHERE id = %s AND closed_at IS NULL
+                        """,
+                        (now_ts, exit_p, spy_exit, close_reason, rec_id),
+                    )
+                    closed_count += 1
+            conn.commit()
+    except Exception as e:
+        print(f"[close_positions_stop_loss] DB error writing closes: {e}")
+
+    print(f"[close_positions_stop_loss] Done — {closed_count} position(s) closed.")
+    return closed_count
+
+
 # ─── Log recommendations ──────────────────────────────────────────────────────
 
 def get_recently_recommended_combos(hours: int = 24) -> set[tuple[str, str, str]]:
@@ -617,8 +893,11 @@ def get_aftermath_table() -> pd.DataFrame:
     3. Compute multi-horizon P&L and alpha vs SPY, including media-exit P&L.
     4. Return enriched display DataFrame.
     """
-    # ── Step 0: Auto-close positions confirmed by media ───────────────────────
+    # ── Step 0: Auto-close positions via all three exit triggers ─────────────
+    # Priority: media > weather resolution > stop-loss/take-profit
     close_positions_from_media()
+    close_positions_weather_resolved()
+    close_positions_stop_loss()
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
@@ -748,17 +1027,26 @@ def get_aftermath_table() -> pd.DataFrame:
         axis=1,
     )
 
-    # Status label
+    # Status label — shows close reason + date
+    _CLOSE_REASON_LABELS: dict[str, str] = {
+        "media_confirmed":  "🚪 Media Exit",
+        "weather_resolved": "🌤️ Event Resolved",
+        "stop_loss":        "🛑 Stop Loss",
+        "take_profit":      "🎯 Take Profit",
+    }
+
     def _status_label(row) -> str:
-        if row.get("close_reason") == "media_confirmed":
+        reason = row.get("close_reason")
+        if reason and reason in _CLOSE_REASON_LABELS:
             closed_dt = row.get("closed_at")
             date_str = ""
             if closed_dt is not None:
                 try:
-                    date_str = f" {pd.Timestamp(closed_dt).strftime('%b %d')}"
+                    if not pd.isna(closed_dt):
+                        date_str = f" {pd.Timestamp(closed_dt).strftime('%b %d')}"
                 except Exception:
                     pass
-            return f"🚪 Closed{date_str}"
+            return f"{_CLOSE_REASON_LABELS[reason]}{date_str}"
         return "⏳ Open"
 
     df["status"] = df.apply(_status_label, axis=1)

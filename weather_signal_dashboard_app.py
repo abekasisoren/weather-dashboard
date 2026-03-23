@@ -2986,7 +2986,29 @@ with tab_pulse:
     pulse_source = filtered.copy()
     pulse_table = build_global_pulse_trader_table(pulse_source)
 
-    _pulse_cols = ["Date", "Stock Trade", "Trade", "Why It Matters", "Final Trade Score"]
+    # ── Entry Gate: classify each signal as Enter / Monitor / Avoid ───────────
+    # 🟢 ENTER  — pre-media, event is new or worsening (highest alpha window)
+    # 🟡 MONITOR — event is stable; worth watching but alpha is narrowing
+    # 🔴 AVOID  — event is recovering (fading); alpha window likely closed
+    def _entry_gate(row) -> str:
+        trend = str(row.get("Trend", "")).lower()
+        if "worsening" in trend:
+            return "🟢 Enter — Worsening"
+        if "new" in trend:
+            return "🟢 Enter — New Signal"
+        if "stable" in trend:
+            return "🟡 Monitor"
+        if "recovering" in trend:
+            return "🔴 Avoid — Fading"
+        return "🟡 Monitor"
+
+    if not pulse_table.empty:
+        pulse_table.insert(0, "Entry Gate", pulse_table.apply(_entry_gate, axis=1))
+
+    _pulse_cols = [
+        "Entry Gate", "Date", "Stock Trade", "Trade",
+        "Why It Matters", "Final Trade Score",
+    ]
 
     if pulse_table.empty:
         st.write("No recommendations right now.")
@@ -2995,6 +3017,13 @@ with tab_pulse:
             [c for c in _pulse_cols if c in pulse_table.columns]
         ].copy()
         st.dataframe(display_pulse, use_container_width=True, height=500)
+
+        st.caption(
+            "**Entry Gate:** "
+            "🟢 Enter = event actively growing, pre-media — highest alpha window.  "
+            "🟡 Monitor = stable signal, alpha narrowing — size down or wait.  "
+            "🔴 Avoid = event fading in GRIB data — thesis deteriorating, skip or exit."
+        )
 
         with st.expander(f"Full detail ({len(pulse_table)} rows)"):
             st.dataframe(pulse_table, use_container_width=True)
@@ -3188,6 +3217,8 @@ with tab_aftermath:
     from recommendations_tracker import (
         ensure_schema, log_recommendations, get_aftermath_table,
         get_performance_summary, get_fetch_errors,
+        STOP_LOSS_PCT, TAKE_PROFIT_PCT,
+        close_positions_stop_loss,
     )
 
     # Ensure DB table exists
@@ -3196,6 +3227,35 @@ with tab_aftermath:
     except Exception as e:
         st.error(f"DB schema error: {e}")
         st.stop()
+
+    # ── Position management settings ─────────────────────────────────────────
+    with st.expander("⚙️ Position Management Settings", expanded=False):
+        pm_col1, pm_col2 = st.columns(2)
+        _sl_pct = pm_col1.slider(
+            "🛑 Stop-Loss %", min_value=1.0, max_value=20.0,
+            value=float(STOP_LOSS_PCT), step=0.5,
+            help="Close position if it moves this % against you",
+        )
+        _tp_pct = pm_col2.slider(
+            "🎯 Take-Profit %", min_value=2.0, max_value=50.0,
+            value=float(TAKE_PROFIT_PCT), step=0.5,
+            help="Close position if it gains this % in your favour",
+        )
+        if st.button("🔄 Apply & Scan Now", help="Run stop-loss/take-profit check immediately with these thresholds"):
+            with st.spinner("Scanning open positions…"):
+                try:
+                    _n_closed = close_positions_stop_loss(
+                        stop_loss_pct=_sl_pct,
+                        take_profit_pct=_tp_pct,
+                    )
+                    if _n_closed:
+                        st.success(f"✅ Closed {_n_closed} position(s) via stop-loss/take-profit.")
+                        # Invalidate cached aftermath so it reloads
+                        st.session_state["aftermath_df"] = None
+                    else:
+                        st.info("No open positions hit the thresholds.")
+                except Exception as _e:
+                    st.error(f"Error scanning: {_e}")
 
     # ── Log today's recommendations ───────────────────────────────────────────
     st.subheader("Log Today's Recommendations")
