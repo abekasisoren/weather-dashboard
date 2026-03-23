@@ -47,6 +47,24 @@ services:
       - key: USDA_NASS_KEY
         sync: false   # optional — enables USDA crop progress scanner
 
+  # ── Policy monitor — runs every 15 min, fastest signal in the system ─────────
+  # Scans GDELT for statements by 45 central bank governors + finance ministers.
+  # Classifies hawkish/dovish/trade-war/stimulus/sanctions → maps to tickers.
+  # GDELT updates every 15 min so this scanner is effectively real-time.
+  - type: cron
+    name: policy-monitor
+    runtime: python
+    plan: free
+    schedule: "*/15 * * * *"   # every 15 minutes, 24/7
+    buildCommand: pip install -r requirements.txt
+    startCommand: python policy_monitor.py
+    envVars:
+      - key: DATABASE_URL
+        fromService:
+          type: web
+          name: weather-dashboard
+          property: connectionString
+
   # ── Mining news scanner — runs every 2 hours to detect supply disruptions ──
   # Scans GDELT, Google News RSS, Bing RSS, NewsAPI for events at 20+ global
   # mining regions. Writes scored signals to the `mining_signals` DB table.
