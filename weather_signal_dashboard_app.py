@@ -3382,7 +3382,8 @@ with tab_mining:
 # ─── Alt Data plain-English explanation helper ────────────────────────────────
 
 def _alt_plain_english(source: str, commodity: str, region: str,
-                        bias: str, sev: int, tix: list) -> str:
+                        bias: str, sev: int, tix: list,
+                        raw_data: dict | None = None) -> str:
     """Return a 2–3 sentence plain English trade thesis for an alt-data signal."""
     com  = commodity.replace("_", " ").title() if commodity else "the commodity"
     reg  = region or "the affected region"
@@ -3392,13 +3393,30 @@ def _alt_plain_english(source: str, commodity: str, region: str,
     urg  = ("Severity is high — consider acting quickly." if sev >= 7
             else "Severity is moderate — monitor for escalation." if sev >= 4
             else "Early-stage signal — keep on watch.")
+    rd   = raw_data or {}
 
     if source == "nrc_incident":
+        score_basis = rd.get("score_basis", "")
+        if score_basis and "Base" in score_basis:
+            # NRC API path — show actual factor breakdown
+            score_note = (
+                f"Score {sev}/10 = {score_basis.replace('Base 4', 'base 4 (confirmed incident)')}. "
+                f"Max 10: +2 if quantity >10,000 units, +1 if pipeline, +1 if offshore/Gulf."
+            )
+        elif score_basis == "gdelt_keyword_match":
+            score_note = (
+                f"Score {sev}/10 based on keyword severity in the headline: "
+                f"+3 explosion/rupture, +2 fire/major spill, +1 pipeline/refinery."
+            )
+        else:
+            score_note = f"Score {sev}/10."
+        qty = rd.get("qty")
+        qty_str = f" Reported quantity: {qty:,} units." if qty and str(qty) not in ("0", "?") else ""
         return (
-            f"A U.S. Nuclear Regulatory Commission incident report was filed for an event "
-            f"in {reg}. NRC filings flag unplanned outages, safety events, or equipment "
-            f"failures at industrial and energy facilities — these can reduce {com} supply "
-            f"and push prices {mov}. Most exposed: {tstr}. {urg}"
+            f"An industrial incident report flagged an event in {reg} affecting {com} infrastructure."
+            f"{qty_str} These reports cover pipeline ruptures, refinery fires, chemical releases, "
+            f"and fuel spills — events that can reduce supply and push prices {mov}. "
+            f"Most exposed: {tstr}. {score_note} {urg}"
         )
     elif source == "sec_8k":
         return (
@@ -3587,6 +3605,14 @@ with tab_alt:
             except Exception:
                 tix = []
 
+            try:
+                raw_data = sig.get("raw_data")
+                if isinstance(raw_data, str):
+                    raw_data = json.loads(raw_data)
+                raw_data = raw_data or {}
+            except Exception:
+                raw_data = {}
+
             _icon     = _src_icons.get(src, "🛰️")
             _lbl      = _SOURCE_LABELS.get(src, src)
             _bias_str = "📈 Long" if bias == "long" else "📉 Short"
@@ -3602,7 +3628,7 @@ with tab_alt:
 
                 # ── Plain-English trade thesis ──────────────────────────────
                 _explanation = _alt_plain_english(
-                    src, str(sig.get("commodity", "")), region, bias, sev, tix
+                    src, str(sig.get("commodity", "")), region, bias, sev, tix, raw_data
                 )
                 st.markdown(
                     f"<div style='"
