@@ -3341,67 +3341,50 @@ with tab_alt:
         st.error(f"Alt data monitor import error: {_ae}")
         st.stop()
 
-    # ── Staleness auto-scan (mirrors mining pattern) ───────────────────────────
-    _ALT_SCAN_INTERVAL_H = 4
+    # ── Load from DB (no auto-scan — cron job keeps data fresh every 4h) ────────
     if "alt_signals_df" not in st.session_state:
-        _alt_auto = False
-        try:
-            import psycopg as _psycopg_alt
-            _db_url = os.environ.get("DATABASE_URL")
-            if _db_url:
-                with _psycopg_alt.connect(_db_url) as _ac:
-                    _ar = _ac.execute(
-                        "SELECT MAX(last_updated) FROM alt_data_signals WHERE is_active = TRUE"
-                    ).fetchone()
-                _alt_last = _ar[0] if _ar and _ar[0] else None
-                if _alt_last is None:
-                    _alt_auto = True
-                else:
-                    _alt_now = pd.Timestamp.now(tz="UTC")
-                    _alt_ts  = (pd.Timestamp(_alt_last).tz_localize("UTC")
-                                if pd.Timestamp(_alt_last).tzinfo is None
-                                else pd.Timestamp(_alt_last))
-                    _alt_auto = (_alt_now - _alt_ts).total_seconds() / 3600 > _ALT_SCAN_INTERVAL_H
-        except Exception:
-            _alt_auto = False
-
-        if _alt_auto:
-            with st.spinner("🔄 Auto-scanning alt-data sources (stale > 4 h)…"):
-                try:
-                    scan_all_alt_data()
-                    deactivate_stale_alt_signals(days=7)
-                    st.session_state["alt_scanned_at"] = (
-                        f"auto · {pd.Timestamp.now().strftime('%H:%M:%S')}"
-                    )
-                except Exception:
-                    pass
-        else:
-            st.session_state["alt_scanned_at"] = "on load"
-
         st.session_state["alt_signals_df"] = get_active_alt_signals()
+        st.session_state["alt_scanned_at"] = "on load"
 
     # ── Controls ───────────────────────────────────────────────────────────────
     a_c1, a_c2, a_c3 = st.columns([1, 1, 4])
     alt_scan_clicked    = a_c1.button("🔍 Scan Now", key="alt_scan_btn", type="primary",
-                                      help="Run all 6 alt-data scanners now")
+                                      help="Run all 6 alt-data scanners (~30–60s)")
     alt_refresh_clicked = a_c2.button("🔄 Refresh",  key="alt_refresh_btn",
                                       help="Reload from DB without rescanning")
 
     if alt_scan_clicked:
-        with st.spinner("Running 6 alt-data scanners…"):
+        from alt_data_monitor import (
+            scan_sec_edgar, scan_nasa_firms, scan_gdelt_labor,
+            scan_nrc_reports, scan_lme_warehouse, scan_usda_crops,
+        )
+        _scan_results = {}
+        _scan_placeholder = st.empty()
+        _sources = [
+            ("📋 SEC EDGAR 8-K",         scan_sec_edgar),
+            ("🔥 NASA FIRMS fires",       scan_nasa_firms),
+            ("⚒️ GDELT Labor unrest",     scan_gdelt_labor),
+            ("⚠️ NRC Incidents",          scan_nrc_reports),
+            ("📦 LME Warehouse",          scan_lme_warehouse),
+            ("🌾 USDA Crop Progress",     scan_usda_crops),
+        ]
+        for _src_label, _src_fn in _sources:
+            _scan_placeholder.info(f"Scanning {_src_label}…")
             try:
-                _alt_results = scan_all_alt_data()
-                deactivate_stale_alt_signals(days=7)
-                st.session_state["alt_signals_df"] = get_active_alt_signals()
-                st.session_state["alt_scanned_at"] = pd.Timestamp.now().strftime("%H:%M:%S")
-                _total = sum(_alt_results.values())
-                if _total:
-                    st.success(f"✅ Found / updated **{_total}** signal(s) across "
-                               f"{sum(1 for v in _alt_results.values() if v)} sources.")
-                else:
-                    st.info("No qualifying signals found this scan.")
-            except Exception as _ae:
-                st.error(f"Scan error: {_ae}")
+                _scan_results[_src_label] = _src_fn()
+            except Exception as _se:
+                _scan_results[_src_label] = 0
+                st.warning(f"{_src_label}: {_se}")
+        _scan_placeholder.empty()
+        deactivate_stale_alt_signals(days=7)
+        st.session_state["alt_signals_df"] = get_active_alt_signals()
+        st.session_state["alt_scanned_at"] = pd.Timestamp.now().strftime("%H:%M:%S")
+        _total = sum(_scan_results.values())
+        if _total:
+            st.success(f"✅ Found / updated **{_total}** signal(s) — "
+                       + "  |  ".join(f"{k}: {v}" for k, v in _scan_results.items() if v))
+        else:
+            st.info("No qualifying signals found. Check individual source warnings above.")
 
     if alt_refresh_clicked:
         st.session_state["alt_signals_df"] = get_active_alt_signals()
