@@ -3567,10 +3567,13 @@ with tab_alt:
                     f"</div>",
                     unsafe_allow_html=True,
                 )
-                # ── Raw headline (collapsed) ─────────────────────────────────
+                # ── Raw headline (small, below thesis) ──────────────────────
                 if summary and summary not in ("nan", "None"):
-                    with st.expander("📄 Raw headline / summary", expanded=False):
-                        st.caption(summary)
+                    st.markdown(
+                        f"<p style='font-size:11px;color:#64748b;margin:4px 0 0 0'>"
+                        f"📄 <i>{summary[:160]}</i></p>",
+                        unsafe_allow_html=True,
+                    )
                 if tix:
                     st.markdown(f"**Affected tickers:** `{'  ·  '.join(tix)}`")
                 if url and url != "None":
