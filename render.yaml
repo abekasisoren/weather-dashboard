@@ -20,11 +20,7 @@ services:
     plan: free
     schedule: "0 */12 * * *"   # 00:00 and 12:00 UTC daily
     buildCommand: pip install -r requirements.txt
-    startCommand: >
-      python update_weather_values.py &&
-      python generate_signals.py &&
-      python generate_global_shocks.py &&
-      rm -f *.grib2
+    startCommand: bash run_weather_pipeline.sh
     envVars:
       - key: DATABASE_URL
         fromService:
