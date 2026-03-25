@@ -209,48 +209,64 @@ def commodity_context_type(row) -> str:
 
 
 def infer_trade(row) -> str:
+    # ── Step 1: explicit DB trade_bias (set by generate_global_shocks.py) ──────
     direct = trade_label_from_bias(row.get("trade_bias"))
     if direct != "No Trade":
         return direct
 
-    anomaly = normalize_anomaly_key(row.get("anomaly_type"))
-    event_map = get_event_market_map(anomaly)
+    anomaly   = normalize_anomaly_key(row.get("anomaly_type"))
+    commodity = normalize_text(row.get("commodity"), "")
+    ctype     = commodity_context_type(row)
 
-    long_names = event_map.get("equities_long_tier1", []) or event_map.get("equities_long", [])
+    # ── Step 2: explicit commodity-level rules ─────────────────────────────────
+    # Heat / dryness → crops stressed → prices up
+    if anomaly in {"heatwave", "extreme_heat", "drought"}:
+        if ctype in {"ag", "energy", "utilities", "metals"}:
+            return "Long"
+        if commodity == "Hydropower":
+            return "Short"  # drought = less hydro generation
+
+    # Cold events → energy / winter crops spike
+    if anomaly in {"cold_wave", "frost", "polar_vortex", "ice_storm"}:
+        if ctype in {"energy"}:
+            return "Long"
+        if ctype == "ag":
+            return "Long"   # cold damages crops → prices up
+        if commodity in {"Power Utilities", "LNG", "Coal", "Dairy"}:
+            return "Long"
+
+    # Rain / flooding → good for hydro, bad for open-field ag, disrupts energy infra
+    if anomaly in {"heavy_rain", "flood_risk", "flood", "atmospheric_river"}:
+        if commodity == "Hydropower":
+            return "Long"
+        if ctype == "ag":
+            return "Short"  # waterlogged fields, crop rot
+        if ctype in {"energy", "utilities"}:
+            return "Long"   # supply disruption
+
+    # Wind / storm / fire → supply disruption in energy and anything physical
+    if anomaly in {"storm_wind", "hurricane_risk", "hurricane",
+                   "wildfire_risk", "wildfire", "extreme_wind"}:
+        if ctype in {"energy", "utilities", "metals"}:
+            return "Long"
+        if ctype == "ag":
+            return "Long"   # field damage → crop loss → prices up
+
+    # Monsoon failure → all ag markets stressed
+    if anomaly in {"monsoon_failure"} and ctype == "ag":
+        return "Long"
+
+    # ── Step 3: market-map fallback — use the map's own direction ─────────────
+    event_map   = get_event_market_map(anomaly)
+    long_names  = event_map.get("equities_long_tier1", []) or event_map.get("equities_long", [])
     short_names = event_map.get("equities_short_tier1", []) or event_map.get("equities_short", [])
 
     if long_names and not short_names:
         return "Long"
     if short_names and not long_names:
         return "Short"
-
-    ctype = commodity_context_type(row)
-    commodity = normalize_text(row.get("commodity"), "")
-
-    if anomaly in {"heatwave", "extreme_heat", "drought"} and ctype in {"ag", "energy", "utilities", "metals"}:
-        return "Long"
-
-    if anomaly in {"drought"} and commodity == "Hydropower":
-        return "Short"  # Drought = less water = less hydro generation
-
-    if anomaly in {"cold_wave", "frost", "polar_vortex", "ice_storm"} and commodity in {
-        "Natural Gas", "Power Utilities", "Wheat", "LNG", "Coal", "Dairy"
-    }:
-        return "Long"
-
-    if anomaly in {"heavy_rain", "flood_risk", "flood", "atmospheric_river"} and ctype == "ag":
-        return "Short"
-
-    if anomaly in {"heavy_rain", "flood_risk", "flood", "atmospheric_river"} and ctype in {"energy", "utilities"}:
-        return "Long"
-
-    if anomaly in {"heavy_rain", "atmospheric_river"} and commodity == "Hydropower":
-        return "Long"  # More rainfall = more hydro generation
-
-    if anomaly in {"storm_wind", "hurricane_risk", "hurricane", "wildfire_risk", "wildfire", "extreme_wind"} and ctype in {"energy", "utilities"}:
-        return "Long"
-
-    if anomaly in {"monsoon_failure"} and ctype == "ag":
+    if long_names and short_names:
+        # Both directions exist — default to Long (disruptions are typically bullish)
         return "Long"
 
     return "No Trade"
