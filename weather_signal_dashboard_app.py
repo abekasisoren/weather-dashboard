@@ -3019,19 +3019,21 @@ with tab_radar:
         _cooldown_combos = st.session_state.get("cooldown_combos", set())
 
         # ── Render 2-column grid of weather-event cards ────────────────────────
+        # owned_symbols=None → each card shows ALL its own tickers.
+        # Ownership is used only for sorting/scoring above, not for filtering display.
         for i in range(0, len(event_groups), 2):
             col_l, col_r = st.columns(2, gap="medium")
             with col_l:
                 show_weather_event_card(
                     event_groups[i][1], rank_number=i + 1, all_df=filtered,
-                    owned_symbols=event_owned_symbols[i],
+                    owned_symbols=None,
                     cooldown_combos=_cooldown_combos,
                 )
             if i + 1 < len(event_groups):
                 with col_r:
                     show_weather_event_card(
                         event_groups[i + 1][1], rank_number=i + 2, all_df=filtered,
-                        owned_symbols=event_owned_symbols[i + 1],
+                        owned_symbols=None,
                         cooldown_combos=_cooldown_combos,
                     )
 
