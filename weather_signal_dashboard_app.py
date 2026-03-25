@@ -2816,9 +2816,9 @@ _ensure_schemas()
 st.title("Global Weather Signal Dashboard")
 st.caption("Early weather intelligence for markets ranked like a trading radar.")
 
-tab_radar, tab_pulse, tab_mining, tab_alt, tab_policy, tab_media, tab_aftermath = st.tabs([
+tab_radar, tab_pulse, tab_mining, tab_alt, tab_policy, tab_media, tab_aftermath, tab_history = st.tabs([
     "🌍 Radar", "📊 Pulse Trader", "⛏️ Mining Signals",
-    "🛰️ Alt Data", "🏛️ Policy Monitor", "📡 Media Signals", "📈 Aftermath"
+    "🛰️ Alt Data", "🏛️ Policy Monitor", "📡 Media Signals", "📈 Aftermath", "📜 History"
 ])
 
 with tab_radar:
@@ -4322,3 +4322,210 @@ with tab_aftermath:
 
         except Exception as ml_err:
             st.warning(f"ML Scorer unavailable: {ml_err}")
+
+
+# ─── Mining History tab ────────────────────────────────────────────────────────
+
+with tab_history:
+    st.header("📜 Mining History — 10-Year GDELT Event Timeline")
+    st.caption(
+        "How often has a commodity's mining sector made global headlines over the last 10 years? "
+        "Each spike = a wave of news about strikes, closures, accidents, floods or protests. "
+        "Sourced live from GDELT's archive of 65-language global news. Cached 24h."
+    )
+
+    try:
+        import plotly.graph_objects as go
+        from mining_history import (
+            COMMODITIES, REGIONS, MAJOR_EVENTS,
+            ensure_history_schema, get_timeline, get_peak_articles, get_major_events,
+        )
+        ensure_history_schema()
+    except Exception as _he:
+        st.error(f"History module unavailable: {_he}")
+        st.stop()
+
+    # ── Controls ───────────────────────────────────────────────────────────────
+    h_c1, h_c2, h_c3 = st.columns([2, 2, 1])
+    h_commodity = h_c1.selectbox(
+        "Commodity", options=list(COMMODITIES.keys()), index=0, key="hist_commodity"
+    )
+    h_region = h_c2.selectbox(
+        "Region", options=list(REGIONS.keys()), index=0, key="hist_region"
+    )
+    h_fetch = h_c3.button("🔄 Load / Refresh", key="hist_fetch_btn", type="primary",
+                          help="Fetch from GDELT (takes ~20s first time, then cached 24h)")
+
+    # ── Session state for cached chart data ───────────────────────────────────
+    _hist_key = f"hist_{h_commodity}_{h_region}"
+    if h_fetch or _hist_key not in st.session_state:
+        with st.spinner(f"Querying GDELT 10-year archive for {h_commodity} · {h_region}…"):
+            _df = get_timeline(h_commodity, h_region)
+            st.session_state[_hist_key] = _df
+    else:
+        _df = st.session_state.get(_hist_key, pd.DataFrame())
+
+    if _df.empty:
+        st.warning(
+            "No data returned from GDELT for this combination. "
+            "Try a different commodity or region, or click **Load / Refresh**."
+        )
+    else:
+        # ── Summary metrics ────────────────────────────────────────────────────
+        _peak_vol  = float(_df["volume"].max())
+        _peak_date = str(_df.loc[_df["volume"].idxmax(), "date"])[:10]
+        _avg_vol   = float(_df["volume"].mean())
+        _recent    = _df[_df["date"] >= pd.Timestamp.now() - pd.Timedelta(days=90)]
+        _recent_avg = float(_recent["volume"].mean()) if not _recent.empty else 0.0
+        _vs_hist   = ((_recent_avg / _avg_vol) - 1) * 100 if _avg_vol > 0 else 0.0
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Peak News Day",     _peak_date)
+        m2.metric("Peak Volume",       f"{_peak_vol:.1f}")
+        m3.metric("10yr Avg / day",    f"{_avg_vol:.2f}")
+        m4.metric("Last 90d vs avg",
+                  f"{_vs_hist:+.0f}%",
+                  delta_color="inverse" if _vs_hist < 0 else "normal")
+
+        st.divider()
+
+        # ── Build Plotly chart ─────────────────────────────────────────────────
+        com_color = COMMODITIES[h_commodity]["color"]
+        fig = go.Figure()
+
+        # Raw volume (faint fill)
+        fig.add_trace(go.Scatter(
+            x=_df["date"], y=_df["volume"],
+            mode="lines",
+            line=dict(color=com_color, width=1),
+            opacity=0.25,
+            fill="tozeroy",
+            fillcolor=com_color.replace(")", ",0.08)").replace("rgb", "rgba") if "rgb" in com_color else com_color + "14",
+            name="Daily volume",
+            hovertemplate="<b>%{x|%d %b %Y}</b><br>Volume: %{y:.2f}<extra></extra>",
+        ))
+
+        # Smoothed line
+        if "volume_smooth" in _df.columns:
+            fig.add_trace(go.Scatter(
+                x=_df["date"], y=_df["volume_smooth"],
+                mode="lines",
+                line=dict(color=com_color, width=2.5),
+                name="4-week average",
+                hovertemplate="<b>%{x|%d %b %Y}</b><br>Smoothed: %{y:.2f}<extra></extra>",
+            ))
+
+        # ── Known major event markers ──────────────────────────────────────────
+        _events = get_major_events(h_commodity)
+        for ev in _events:
+            ev_dt = pd.Timestamp(ev["date"])
+            if _df["date"].min() <= ev_dt <= _df["date"].max():
+                # find volume at that date (nearest)
+                _nearest = _df.iloc[(_df["date"] - ev_dt).abs().argsort()[:1]]
+                _yval    = float(_nearest["volume"].values[0]) if not _nearest.empty else _peak_vol * 0.5
+                fig.add_vline(
+                    x=ev_dt.timestamp() * 1000,
+                    line_width=1.5, line_dash="dot",
+                    line_color="rgba(251,191,36,0.6)",
+                )
+                fig.add_annotation(
+                    x=ev_dt,
+                    y=_yval + _peak_vol * 0.05,
+                    text=f"📌 {ev['label']}",
+                    showarrow=True,
+                    arrowhead=2,
+                    arrowcolor="rgba(251,191,36,0.8)",
+                    font=dict(size=10, color="#fbbf24"),
+                    bgcolor="rgba(0,0,0,0.6)",
+                    bordercolor="#fbbf24",
+                    borderwidth=1,
+                    ax=0, ay=-35,
+                )
+
+        # ── Find top-5 spikes automatically and label them ─────────────────────
+        _smooth_col = "volume_smooth" if "volume_smooth" in _df.columns else "volume"
+        _top5 = _df.nlargest(5, _smooth_col)
+        for _, row in _top5.iterrows():
+            # Only label if not already covered by a known event (within 30 days)
+            row_dt = pd.Timestamp(row["date"])
+            already = any(
+                abs((pd.Timestamp(ev["date"]) - row_dt).days) < 30
+                for ev in _events
+            )
+            if not already:
+                fig.add_annotation(
+                    x=row_dt,
+                    y=float(row[_smooth_col]) + _peak_vol * 0.03,
+                    text=f"🔺 {row_dt.strftime('%b %Y')}",
+                    showarrow=False,
+                    font=dict(size=9, color="#f87171"),
+                    bgcolor="rgba(0,0,0,0.5)",
+                )
+
+        fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="#0e1117",
+            plot_bgcolor="#0e1117",
+            height=420,
+            margin=dict(l=40, r=20, t=30, b=40),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            xaxis=dict(title="", gridcolor="#1e293b", showgrid=True),
+            yaxis=dict(title="News volume index", gridcolor="#1e293b", showgrid=True),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.caption(
+            f"📌 Yellow dotted lines = known major events.  "
+            f"🔺 Red labels = automatically detected volume spikes.  "
+            f"Commodity: **{h_commodity}** · Region: **{h_region}**"
+        )
+
+        st.divider()
+
+        # ── Top spike table ────────────────────────────────────────────────────
+        st.subheader("📊 Top 10 News Spike Periods")
+        _top10 = (
+            _df.nlargest(10, _smooth_col)[["date", "volume", _smooth_col]]
+            .rename(columns={"date": "Date", "volume": "Raw Volume", _smooth_col: "Smoothed Volume"})
+            .copy()
+        )
+        _top10["Date"] = _top10["Date"].dt.strftime("%d %b %Y")
+        # Find nearest known event for context
+        def _nearest_event(date_str):
+            try:
+                dt = pd.Timestamp(date_str)
+                nearest = min(MAJOR_EVENTS, key=lambda e: abs((pd.Timestamp(e["date"]) - dt).days))
+                days_off = abs((pd.Timestamp(nearest["date"]) - dt).days)
+                return nearest["label"] if days_off < 45 else "—"
+            except Exception:
+                return "—"
+        _top10["Nearest Known Event"] = _top10["Date"].apply(_nearest_event)
+        st.dataframe(_top10, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # ── Recent articles ────────────────────────────────────────────────────
+        st.subheader(f"📰 Recent Headlines — {h_commodity} · {h_region} (last 3 months)")
+        st.caption("Live from GDELT. These are the most recent articles matching this commodity/region.")
+        with st.spinner("Fetching recent articles…"):
+            _arts = get_peak_articles(h_commodity, h_region)
+        if _arts:
+            for art in _arts[:8]:
+                _title = art.get("title", "No title")
+                _url   = art.get("url", "#")
+                _src   = art.get("domain", art.get("sourcecountry", ""))
+                _dt    = art.get("seendate", "")[:8]
+                try:
+                    _dt = datetime.strptime(_dt, "%Y%m%d").strftime("%d %b %Y") if _dt else ""
+                except Exception:
+                    pass
+                st.markdown(
+                    f"<div style='padding:6px 0;border-bottom:1px solid #1e293b'>"
+                    f"<span style='font-size:11px;color:#64748b'>{_dt} · {_src}</span><br>"
+                    f"<a href='{_url}' target='_blank' style='color:#93c5fd;font-size:13px'>{_title}</a>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("No recent articles found. GDELT may have limited coverage for this combination.")
