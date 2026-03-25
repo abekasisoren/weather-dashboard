@@ -5,7 +5,12 @@ import pandas as pd
 import psycopg
 import streamlit as st
 
-from weather_market_map import get_best_trade_expressions, get_event_candidates, get_event_market_map
+from weather_market_map import (
+    get_best_trade_expressions,
+    get_event_candidates,
+    get_event_market_map,
+    get_commodity_candidates,
+)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -369,6 +374,15 @@ def get_vehicle(row) -> str:
 
 
 def get_symbol_candidate(row, symbol: str, direction: str):
+    """Find candidate metadata for a symbol.  Commodity-specific map takes priority."""
+    # 1) Check commodity-specific map first — gives correct directness for
+    #    wheat/copper/lithium stocks that aren't in the anomaly-level map.
+    commodity = normalize_text(row.get("commodity"), "")
+    if commodity:
+        for candidate in get_commodity_candidates(commodity, direction.lower(), max_tier=3):
+            if candidate.get("symbol") == symbol:
+                return candidate
+    # 2) Fall back to anomaly-level market map
     anomaly = normalize_anomaly_key(row.get("anomaly_type"))
     candidates = get_event_candidates(anomaly, direction=direction.lower(), max_tier=3)
     for candidate in candidates:
@@ -378,16 +392,18 @@ def get_symbol_candidate(row, symbol: str, direction: str):
 
 
 def get_stock_trade_symbols(row) -> tuple[str, list[str]]:
-    anomaly = normalize_anomaly_key(row.get("anomaly_type"))
-    trade = infer_trade(row)
-    trade_map = get_best_trade_expressions(anomaly)
+    anomaly   = normalize_anomaly_key(row.get("anomaly_type"))
+    commodity = normalize_text(row.get("commodity"), "")
+    trade     = infer_trade(row)
+    # Pass commodity so we get commodity-specific stocks, not generic gas producers
+    trade_map = get_best_trade_expressions(anomaly, commodity=commodity)
 
     if trade == "Long":
-        names = trade_map.get("best_longs", [])[:3]
+        names = trade_map.get("best_longs", [])[:5]
         return "Long", names
 
     if trade == "Short":
-        names = trade_map.get("best_shorts", [])[:3]
+        names = trade_map.get("best_shorts", [])[:5]
         return "Short", names
 
     return "No Trade", []
@@ -919,14 +935,19 @@ def compute_confluence_bonus(df: pd.DataFrame, anomaly_type: str) -> float:
     Bonus for same anomaly type appearing in multiple DISTINCT regions simultaneously.
     Counts unique regions, not rows — prevents commodity-row inflation from
     inflating the bonus when the same region just has multiple commodities.
+
+    Reduced from 1.0/0.5 to 0.4/0.2 to prevent all cards in a widespread
+    cold-wave episode from bunching at 9.5-10.0.
     """
     region_count = int(
         df[df["anomaly_type"] == anomaly_type]["region"].nunique()
     )
+    if region_count >= 5:
+        return 0.4   # was 1.0
     if region_count >= 3:
-        return 1.0
+        return 0.3   # was 1.0
     if region_count == 2:
-        return 0.5
+        return 0.2   # was 0.5
     return 0.0
 
 
