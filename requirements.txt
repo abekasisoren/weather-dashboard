@@ -7,3 +7,4 @@ ecmwf-opendata
 psycopg[binary]
 scikit-learn
 xgboost
+plotly
