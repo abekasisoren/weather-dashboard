@@ -691,8 +691,8 @@ def get_best_trade_expressions(event_name: str) -> dict:
     event_data = get_event_market_map(event_name)
     return {
         "preferred_vehicle": get_preferred_vehicle(event_name),
-        "best_longs": get_top_equities(event_name, "long", max_names=3, max_tier=2),
-        "best_shorts": get_top_equities(event_name, "short", max_names=3, max_tier=2),
+        "best_longs": get_top_equities(event_name, "long", max_names=5, max_tier=3),
+        "best_shorts": get_top_equities(event_name, "short", max_names=5, max_tier=3),
         "commodities": event_data.get("commodities", []),
         "sectors": event_data.get("sectors", []),
     }
