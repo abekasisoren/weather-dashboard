@@ -651,6 +651,245 @@ def _attach_legacy_fields(event_map):
 WEATHER_MARKET_MAP = _attach_legacy_fields(BASE_WEATHER_MARKET_MAP)
 
 
+# ── Commodity-specific equity map ────────────────────────────────────────────
+# When a weather event hits a specific commodity, show tickers directly
+# relevant to THAT commodity — not the generic anomaly-level stocks.
+# Keys must match the commodity names stored in the DB (title-case).
+COMMODITY_EQUITIES: dict[str, dict[str, list]] = {
+    "Wheat": {
+        "long": [
+            _candidate("WEAT", "long", "wheat_etf",    1, 0.93, "Direct wheat price ETF"),
+            _candidate("ADM",  "long", "grain_trader", 1, 0.86, "Archer-Daniels major wheat merchandiser"),
+            _candidate("BG",   "long", "grain_trader", 1, 0.83, "Bunge global wheat & oilseed trader"),
+            _candidate("MOS",  "long", "fertilizer",   2, 0.65, "Wheat replanting / fertilizer demand"),
+            _candidate("NTR",  "long", "fertilizer",   2, 0.62, "Nutrien fertilizer demand from wheat acreage"),
+        ],
+        "short": [
+            _candidate("WEAT", "short", "wheat_etf",   1, 0.92, "Short wheat on harvest surplus or good rains"),
+            _candidate("ADM",  "short", "grain_trader",2, 0.58, "Grain trader margin squeeze on oversupply"),
+        ],
+    },
+    "Corn": {
+        "long": [
+            _candidate("CORN", "long", "corn_etf",    1, 0.93, "Teucrium corn direct price ETF"),
+            _candidate("ADM",  "long", "grain_trader", 1, 0.83, "ADM major corn merchandiser & ethanol"),
+            _candidate("BG",   "long", "grain_trader", 1, 0.80, "Bunge corn & ethanol trader"),
+            _candidate("MOS",  "long", "fertilizer",   2, 0.65, "Corn replant fertilizer demand"),
+            _candidate("NTR",  "long", "fertilizer",   2, 0.62, "Corn acreage fertilizer demand"),
+        ],
+        "short": [
+            _candidate("CORN", "short", "corn_etf",   1, 0.91, "Short corn on bumper crop or strong rains"),
+        ],
+    },
+    "Soybeans": {
+        "long": [
+            _candidate("SOYB", "long", "soy_etf",     1, 0.93, "Teucrium soybean direct price ETF"),
+            _candidate("ADM",  "long", "grain_trader", 1, 0.86, "ADM soybean crushing leader"),
+            _candidate("BG",   "long", "grain_trader", 1, 0.83, "Bunge global soy trader"),
+            _candidate("INGR", "long", "food_proc",    2, 0.60, "Ingredion soy ingredient processing"),
+        ],
+        "short": [
+            _candidate("SOYB", "short", "soy_etf",    1, 0.91, "Short soybeans on good rains / oversupply"),
+        ],
+    },
+    "Sunflower Oil": {
+        "long": [
+            _candidate("DBA",  "long", "ag_etf",      1, 0.80, "Invesco DB Agriculture ETF oilseed exposure"),
+            _candidate("ADM",  "long", "grain_trader", 1, 0.78, "ADM oilseed processing & sunflower"),
+            _candidate("BG",   "long", "grain_trader", 1, 0.75, "Bunge sunflower oil & Black Sea exposure"),
+        ],
+        "short": [
+            _candidate("DBA",  "short", "ag_etf",     2, 0.55, "Oilseed price decline"),
+        ],
+    },
+    "Canola": {
+        "long": [
+            _candidate("MOO",  "long", "ag_etf",      1, 0.83, "VanEck Agribusiness ETF canola exposure"),
+            _candidate("NTR",  "long", "fertilizer",   1, 0.80, "Nutrien Canadian canola fertilizer"),
+            _candidate("ADM",  "long", "grain_trader", 2, 0.70, "ADM canola crushing"),
+            _candidate("BG",   "long", "grain_trader", 2, 0.68, "Bunge canola trading"),
+        ],
+        "short": [
+            _candidate("MOO",  "short", "ag_etf",     2, 0.55, "Canola supply surplus"),
+        ],
+    },
+    "Coffee": {
+        "long": [
+            _candidate("JO",   "long", "coffee_etf",  1, 0.96, "iPath Series B Coffee ETN direct exposure"),
+            _candidate("SBUX", "long", "coffee_brand", 2, 0.50, "Starbucks input cost pass-through benefit"),
+        ],
+        "short": [
+            _candidate("JO",   "short", "coffee_etf", 1, 0.93, "Short coffee on oversupply or ideal weather"),
+            _candidate("SBUX", "short", "coffee_brand",2, 0.48, "Input cost squeeze on margin"),
+        ],
+    },
+    "Sugar": {
+        "long": [
+            _candidate("CANE", "long", "sugar_etf",   1, 0.96, "Teucrium Sugar direct price ETF"),
+        ],
+        "short": [
+            _candidate("CANE", "short", "sugar_etf",  1, 0.93, "Short sugar on good crop"),
+        ],
+    },
+    "Cocoa": {
+        "long": [
+            _candidate("NIB",  "long", "cocoa_etf",   1, 0.96, "iPath Bloomberg Cocoa direct ETN"),
+            _candidate("MDLZ", "long", "confectionery",2, 0.55, "Mondelez cocoa input cost pass-through"),
+        ],
+        "short": [
+            _candidate("NIB",  "short", "cocoa_etf",  1, 0.93, "Short cocoa on bumper West Africa crop"),
+        ],
+    },
+    "Palm Oil": {
+        "long": [
+            _candidate("DBA",  "long", "ag_etf",      1, 0.78, "DB Agriculture ETF oilseed proxy"),
+            _candidate("ADM",  "long", "grain_trader", 2, 0.65, "ADM oilseed & palm processing"),
+        ],
+        "short": [
+            _candidate("DBA",  "short", "ag_etf",     2, 0.55, "Palm oversupply pressure"),
+        ],
+    },
+    "Olive Oil": {
+        "long": [
+            _candidate("DBA",  "long", "ag_etf",      1, 0.75, "DB Agriculture ETF olive oil proxy"),
+        ],
+        "short": [],
+    },
+    "Rice": {
+        "long": [
+            _candidate("DBA",  "long", "ag_etf",      1, 0.78, "DB Agriculture ETF rice proxy"),
+        ],
+        "short": [],
+    },
+    "Cattle": {
+        "long": [
+            _candidate("COW",  "long", "livestock_etf",1, 0.91, "iPath Bloomberg Livestock ETN"),
+            _candidate("TSN",  "long", "meat_packer",  2, 0.68, "Tyson Foods beef processing margin"),
+            _candidate("LW",   "long", "meat_packer",  2, 0.65, "Lamb Weston / Pilgrim's meat processing"),
+        ],
+        "short": [
+            _candidate("COW",  "short", "livestock_etf",1, 0.89, "Short cattle on warm weather / ample feed"),
+        ],
+    },
+    "Dairy": {
+        "long": [
+            _candidate("DBA",  "long", "ag_etf",       2, 0.65, "DB Ag ETF dairy proxy"),
+        ],
+        "short": [],
+    },
+    "Natural Gas": {
+        "long": [
+            _candidate("UNG",  "long", "ng_etf",       1, 0.96, "United States Natural Gas Fund direct ETF"),
+            _candidate("EQT",  "long", "gas_producer",  1, 0.93, "EQT Corp leading US natural gas producer"),
+            _candidate("RRC",  "long", "gas_producer",  1, 0.91, "Range Resources high gas sensitivity"),
+            _candidate("CTRA", "long", "gas_producer",  1, 0.89, "Coterra Energy diversified gas"),
+            _candidate("AR",   "long", "gas_producer",  2, 0.75, "Antero Resources Appalachian gas"),
+        ],
+        "short": [
+            _candidate("UNG",  "short", "ng_etf",      1, 0.94, "Short natural gas on warm weather / glut"),
+        ],
+    },
+    "LNG": {
+        "long": [
+            _candidate("LNG",  "long", "lng_export",   1, 0.93, "Cheniere Energy LNG export leader"),
+            _candidate("EQT",  "long", "gas_producer",  1, 0.85, "LNG feedstock upstream producer"),
+            _candidate("UNG",  "long", "ng_etf",        2, 0.72, "Gas price proxy for LNG"),
+        ],
+        "short": [],
+    },
+    "Coal": {
+        "long": [
+            _candidate("BTU",  "long", "coal_producer",1, 0.93, "Peabody Energy largest thermal coal"),
+            _candidate("ARCH", "long", "coal_producer",1, 0.89, "Arch Resources metallurgical coal"),
+            _candidate("CEIX", "long", "coal_producer",1, 0.86, "CONSOL Energy coal & gas"),
+            _candidate("KOL",  "long", "coal_etf",     2, 0.70, "VanEck Coal ETF diversified exposure"),
+        ],
+        "short": [],
+    },
+    "Oil": {
+        "long": [
+            _candidate("USO",  "long", "oil_etf",      1, 0.96, "United States Oil Fund direct ETF"),
+            _candidate("XOM",  "long", "oil_major",    1, 0.89, "ExxonMobil integrated oil major"),
+            _candidate("CVX",  "long", "oil_major",    1, 0.86, "Chevron integrated oil major"),
+            _candidate("COP",  "long", "oil_producer", 1, 0.83, "ConocoPhillips E&P upstream"),
+            _candidate("XLE",  "long", "energy_etf",   2, 0.75, "Energy Select Sector SPDR ETF"),
+        ],
+        "short": [
+            _candidate("USO",  "short", "oil_etf",     1, 0.94, "Short crude oil on demand weakness"),
+        ],
+    },
+    "Power Utilities": {
+        "long": [
+            _candidate("XLU",  "long", "utilities_etf",1, 0.91, "Utilities Select Sector SPDR ETF"),
+            _candidate("NEE",  "long", "utility",      1, 0.86, "NextEra Energy largest US utility"),
+            _candidate("DUK",  "long", "utility",      2, 0.73, "Duke Energy regulated southeast utility"),
+            _candidate("SO",   "long", "utility",      2, 0.71, "Southern Company regulated utility"),
+            _candidate("AWK",  "long", "water_utility",2, 0.65, "American Water Works climate demand"),
+        ],
+        "short": [],
+    },
+    "Hydropower": {
+        "long": [
+            _candidate("BEP",  "long", "renewable_util",1, 0.93, "Brookfield Renewable Partners hydro leader"),
+            _candidate("NEE",  "long", "utility",       1, 0.83, "NextEra renewable & hydro utility"),
+            _candidate("AES",  "long", "utility",       2, 0.71, "AES hydro and global renewable"),
+            _candidate("XLU",  "long", "utilities_etf", 2, 0.65, "Utilities sector proxy"),
+        ],
+        "short": [
+            _candidate("BEP",  "short", "renewable_util",1, 0.89, "Drought reduces hydro output → revenue drop"),
+            _candidate("XLU",  "short", "utilities_etf", 2, 0.60, "Utilities sector pressure from hydro shortage"),
+        ],
+    },
+    "Copper": {
+        "long": [
+            _candidate("COPX", "long", "copper_etf",   1, 0.96, "Global X Copper Miners ETF"),
+            _candidate("FCX",  "long", "copper_miner", 1, 0.93, "Freeport-McMoRan world's largest copper miner"),
+            _candidate("SCCO", "long", "copper_miner", 1, 0.91, "Southern Copper Latin America specialist"),
+            _candidate("TECK", "long", "copper_miner", 2, 0.73, "Teck Resources copper & zinc diversified"),
+        ],
+        "short": [],
+    },
+    "Lithium": {
+        "long": [
+            _candidate("LIT",  "long", "lithium_etf",  1, 0.96, "Global X Lithium & Battery Tech ETF"),
+            _candidate("ALB",  "long", "lithium_chem", 1, 0.93, "Albemarle global lithium chemicals leader"),
+            _candidate("SQM",  "long", "lithium_chem", 1, 0.91, "SQM Chilean lithium brine operations"),
+            _candidate("LAC",  "long", "lithium_dev",  2, 0.73, "Lithium Americas development stage"),
+        ],
+        "short": [],
+    },
+    "Gold": {
+        "long": [
+            _candidate("GLD",  "long", "gold_etf",    1, 0.96, "SPDR Gold Shares largest gold ETF"),
+            _candidate("GOLD", "long", "gold_miner",  1, 0.89, "Barrick Gold senior miner"),
+            _candidate("NEM",  "long", "gold_miner",  1, 0.86, "Newmont Mining largest gold miner"),
+            _candidate("AEM",  "long", "gold_miner",  2, 0.73, "Agnico Eagle senior gold miner"),
+        ],
+        "short": [],
+    },
+    "Silver": {
+        "long": [
+            _candidate("SLV",  "long", "silver_etf",  1, 0.96, "iShares Silver Trust direct ETF"),
+            _candidate("WPM",  "long", "streaming",   1, 0.89, "Wheaton Precious Metals silver streaming"),
+            _candidate("AG",   "long", "silver_miner",2, 0.76, "First Majestic Silver primary silver miner"),
+        ],
+        "short": [],
+    },
+}
+
+
+def get_commodity_candidates(commodity: str, direction: str = "long", max_tier: int = 3) -> list[dict]:
+    """Return commodity-specific equity candidates for a named commodity."""
+    if not commodity:
+        return []
+    # Normalise to title-case to match COMMODITY_EQUITIES keys
+    key = commodity.strip().title()
+    bucket = COMMODITY_EQUITIES.get(key, {})
+    candidates = bucket.get(direction.lower(), [])
+    filtered = [c for c in candidates if c.get("tier", 99) <= max_tier]
+    return sorted(filtered, key=lambda x: (x.get("tier", 99), -float(x.get("directness", 0))))
+
+
 def get_event_market_map(event_name: str) -> dict:
     return deepcopy(WEATHER_MARKET_MAP.get(str(event_name).strip().lower(), {}))
 
@@ -687,12 +926,28 @@ def get_preferred_vehicle(event_name: str) -> str:
     return vehicles[0] if vehicles else ""
 
 
-def get_best_trade_expressions(event_name: str) -> dict:
+def get_best_trade_expressions(event_name: str, commodity: str = "") -> dict:
+    """Return best trade vehicles and equity names for an event.
+
+    When *commodity* is provided, commodity-specific tickers take priority
+    over the generic anomaly-level equities (which default to gas producers
+    for cold events regardless of the actual commodity being traded).
+    """
     event_data = get_event_market_map(event_name)
+
+    if commodity:
+        com_longs  = get_commodity_candidates(commodity, "long",  max_tier=3)
+        com_shorts = get_commodity_candidates(commodity, "short", max_tier=3)
+        best_longs  = [c["symbol"] for c in com_longs[:5]]  if com_longs  else get_top_equities(event_name, "long",  max_names=5, max_tier=3)
+        best_shorts = [c["symbol"] for c in com_shorts[:5]] if com_shorts else get_top_equities(event_name, "short", max_names=5, max_tier=3)
+    else:
+        best_longs  = get_top_equities(event_name, "long",  max_names=5, max_tier=3)
+        best_shorts = get_top_equities(event_name, "short", max_names=5, max_tier=3)
+
     return {
         "preferred_vehicle": get_preferred_vehicle(event_name),
-        "best_longs": get_top_equities(event_name, "long", max_names=5, max_tier=3),
-        "best_shorts": get_top_equities(event_name, "short", max_names=5, max_tier=3),
+        "best_longs":  best_longs,
+        "best_shorts": best_shorts,
         "commodities": event_data.get("commodities", []),
-        "sectors": event_data.get("sectors", []),
+        "sectors":     event_data.get("sectors", []),
     }
