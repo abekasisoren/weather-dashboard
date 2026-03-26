@@ -155,6 +155,36 @@ def normalize_anomaly_key(value: str) -> str:
     return mapping.get(raw, raw)
 
 
+# Anomaly family map: same-region events in the same family are duplicates —
+# only the highest-scoring one is shown.
+ANOMALY_FAMILY: dict[str, str] = {
+    # Cold events — all represent the same "it's freezing" market story
+    "cold_wave":       "cold",
+    "frost":           "cold",
+    "ice_storm":       "cold",
+    "polar_vortex":    "cold",
+    # Heat / dry events
+    "heatwave":        "heat",
+    "extreme_heat":    "heat",
+    "drought":         "dry",
+    # Wet / flood events
+    "heavy_rain":      "wet",
+    "flood_risk":      "wet",
+    "flood":           "wet",
+    "atmospheric_river": "wet",
+    "monsoon_failure": "dry",
+    # Wind / storm events
+    "storm_wind":      "wind",
+    "extreme_wind":    "wind",
+    "hurricane_risk":  "wind",
+    "hurricane":       "wind",
+    "tornado":         "wind",
+    # Fire
+    "wildfire_risk":   "fire",
+    "wildfire":        "fire",
+}
+
+
 def commodity_context_type(row) -> str:
     commodity = normalize_text(row.get("commodity"), "")
     if commodity in {"Corn", "Soybeans", "Wheat", "Coffee", "Sugar", "Rice", "Cocoa", "Palm Oil",
@@ -2900,17 +2930,23 @@ with tab_radar:
             event_score = float(grp["preview_score"].max())
             event_groups.append((event_score, grp))
 
-        # Sort events by best score; deduplicate safety net for any residual casing collisions
+        # Sort events by best score; deduplicate:
+        #   1) exact (region, anomaly_type) collisions
+        #   2) same-family events in the same region (e.g. Frost + Cold Wave
+        #      in Kazakhstan both map to family "cold" — keep highest-scoring only)
         event_groups.sort(key=lambda x: x[0], reverse=True)
         seen_event_keys: set = set()
+        seen_family_keys: set = set()  # (region, family) — cross-anomaly dedup
         deduped: list = []
         for _score, _grp in event_groups:
-            key = (
-                _grp["region"].iloc[0].strip().lower(),
-                _grp["anomaly_type"].iloc[0].strip().lower(),
-            )
-            if key not in seen_event_keys:
+            _region_norm  = _grp["region"].iloc[0].strip().lower()
+            _anomaly_norm = _grp["anomaly_type"].iloc[0].strip().lower()
+            key        = (_region_norm, _anomaly_norm)
+            family     = ANOMALY_FAMILY.get(_anomaly_norm, _anomaly_norm)
+            family_key = (_region_norm, family)
+            if key not in seen_event_keys and family_key not in seen_family_keys:
                 seen_event_keys.add(key)
+                seen_family_keys.add(family_key)
                 deduped.append((_score, _grp))
         event_groups = deduped[:top_n]
 
