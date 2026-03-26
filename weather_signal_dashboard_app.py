@@ -325,14 +325,10 @@ def build_title(row) -> str:
 
 
 def get_vehicle(row) -> str:
-    anomaly = normalize_anomaly_key(row.get("anomaly_type"))
-    trade_map = get_best_trade_expressions(anomaly)
-    vehicle = normalize_text(trade_map.get("preferred_vehicle"), "")
-    if vehicle and vehicle != "-":
-        return vehicle
-
+    # Commodity-specific ETF takes priority — cold_wave anomaly map returns UNG
+    # for all events, but a Wheat event should use WEAT, Copper should use COPX, etc.
     commodity = normalize_text(row.get("commodity"), "")
-    fallback = {
+    _commodity_etf = {
         "Corn": "CORN",
         "Soybeans": "SOYB",
         "Wheat": "WEAT",
@@ -348,15 +344,22 @@ def get_vehicle(row) -> str:
         "Canola": "MOO",
         "LNG": "UNG",
         "Olive Oil": "DBA",
-        # New commodities
         "Sunflower Oil": "DBA",
         "Hydropower": "XLU",
         "Copper": "COPX",
         "Lithium": "LIT",
         "Dairy": "DBA",
         "Cattle": "COW",
+        "Gold": "GLD",
+        "Silver": "SLV",
     }
-    return fallback.get(commodity, commodity if commodity else "-")
+    if commodity in _commodity_etf:
+        return _commodity_etf[commodity]
+    # Fall back to anomaly-level preferred vehicle only when no commodity ETF exists
+    anomaly = normalize_anomaly_key(row.get("anomaly_type"))
+    trade_map = get_best_trade_expressions(anomaly)
+    vehicle = normalize_text(trade_map.get("preferred_vehicle"), "")
+    return vehicle if vehicle and vehicle != "-" else (commodity if commodity else "-")
 
 
 def get_symbol_candidate(row, symbol: str, direction: str):
@@ -951,10 +954,12 @@ def compute_final_trade_score(
     """Compute final trade score (0-10).
     Weights: weather_strength 0.30, mapping_quality 0.20, conflict_cleanliness 0.10,
              execution_quality 0.10, seasonality 0.10, trend 0.10, edge_score 0.10.
-    After weighted sum + confluence bonus, apply phenological multiplier:
-      2.0 = critical crop stage (score boosted up to 2×, capped at 10)
-      1.0 = neutral (no change)
-      0.3 = dormancy / off-season (score heavily discounted)
+    Phenological stage is applied as an ADDITIVE adjustment (±2 pts max) rather than
+    a multiplier — multiplicative 2× was clamping all moderate-to-strong crop events
+    at 10.0 and destroying score differentiation.
+      +2.0 = critical crop stage (e.g. Wheat heading in May)
+       0.0 = neutral / no calendar entry
+      -1.5 = deep dormancy / off-season (minimal market impact)
     """
     score = (
         0.30 * weather_strength +
@@ -965,9 +970,10 @@ def compute_final_trade_score(
         0.10 * trend_factor +
         0.10 * edge_score
     ) + confluence_bonus
-    # Phenological multiplier: crop-stage sensitivity adjusts the final score
-    pheno = max(0.3, min(pheno_multiplier, 2.0))
-    score = score * pheno
+    # Phenological adjustment: additive ±2 pts preserves relative score order
+    pheno_adj = (pheno_multiplier - 1.0) * 2.0   # [0.3→-1.4, 1.0→0, 2.0→+2.0]
+    pheno_adj = max(-1.5, min(pheno_adj, 2.0))
+    score = score + pheno_adj
     return round(clamp(score), 2)
 
 
@@ -1071,10 +1077,10 @@ def build_global_pulse_trader_table(df: pd.DataFrame) -> pd.DataFrame:
         edge_score = float(winner.get("Edge Score", 7.0))
         why = winner["Why"]
 
-        # Confluence bonus: check how many regions have the same anomaly
+        # Confluence bonus: count UNIQUE REGIONS with this anomaly (not rows)
+        # Uses the same compute_confluence_bonus() as the Radar cards so scores are consistent.
         anomaly_type = winner["Anomaly Type"]
-        same_anomaly_count = int((raw_df["Anomaly Type"] == anomaly_type).sum())
-        conf_bonus = 1.0 if same_anomaly_count >= 3 else 0.5 if same_anomaly_count == 2 else 0.0
+        conf_bonus = compute_confluence_bonus(df, anomaly_type)
 
         # Pheno multiplier from winner row (original df row context)
         pheno_mult_pulse, _pheno_stage_pulse = compute_phenological_multiplier(winner)
