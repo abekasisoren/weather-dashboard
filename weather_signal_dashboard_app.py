@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime
 
 import pandas as pd
 import psycopg
@@ -2734,6 +2735,84 @@ df = (
     .drop_duplicates(subset=["region", "commodity", "anomaly_type"], keep="first")
     .reset_index(drop=True)
 )
+
+# ─── Auto media validation (runs once per session, max every 6 hours) ────────
+
+def _run_auto_media_validation() -> int:
+    """
+    Silently validate unconfirmed signals in the background.
+    Returns number of newly confirmed signals.
+    """
+    import threading
+
+    confirmed_count = [0]
+
+    def _worker():
+        try:
+            from media_validator import MediaValidator, write_validation_to_db
+            import psycopg as _psycopg
+
+            with _psycopg.connect(DATABASE_URL) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT ON (region, anomaly_type)
+                            id, region, anomaly_type, commodity
+                        FROM weather_global_shocks
+                        WHERE
+                            media_validated IS NOT TRUE
+                            AND created_at >= NOW() - INTERVAL '14 days'
+                            AND signal_level >= 2
+                        ORDER BY region, anomaly_type, signal_level DESC
+                        """
+                    )
+                    events = [
+                        {"id": r[0], "region": r[1], "anomaly_type": r[2], "commodity": r[3]}
+                        for r in cur.fetchall()
+                    ]
+
+            if not events:
+                return
+
+            validator = MediaValidator()
+            for ev in events:
+                summary = validator.validate_signal(
+                    signal_id=ev["id"],
+                    region=ev["region"],
+                    anomaly=ev["anomaly_type"],
+                    commodity=ev.get("commodity") or "",
+                )
+                if summary.is_confirmed:
+                    try:
+                        with _psycopg.connect(DATABASE_URL) as conn:
+                            write_validation_to_db(conn, ev["id"], summary)
+                        confirmed_count[0] += 1
+                    except Exception:
+                        pass
+
+        except Exception:
+            pass  # Never crash the dashboard on validation failure
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout=45)  # Wait up to 45s; dashboard continues regardless
+    return confirmed_count[0]
+
+
+_AUTO_VALID_INTERVAL_HOURS = 6
+_now = datetime.utcnow()  # noqa: DTZ003
+_last_valid = st.session_state.get("last_media_validation_at")
+_should_validate = (
+    _last_valid is None
+    or (_now - _last_valid).total_seconds() > _AUTO_VALID_INTERVAL_HOURS * 3600
+)
+
+if _should_validate:
+    st.session_state["last_media_validation_at"] = _now
+    _newly_confirmed = _run_auto_media_validation()
+    if _newly_confirmed > 0:
+        st.toast(f"📰 {_newly_confirmed} new media confirmation(s) — refresh to see EXIT signals", icon="🟠")
+
 
 # ─── Sidebar filters ─────────────────────────────────────────────────────────
 
