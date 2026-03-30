@@ -2,7 +2,7 @@ services:
   - type: web
     name: weather-dashboard
     runtime: python
-    plan: professional
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: bash start_dashboard.sh
 
@@ -16,7 +16,7 @@ services:
   - type: cron
     name: weather-signal-updater
     runtime: python
-    plan: professional
+    plan: starter
     schedule: "0 */12 * * *"   # 00:00 and 12:00 UTC daily  (2 builds/day)
     buildCommand: pip install -r requirements.txt
     startCommand: bash run_weather_pipeline.sh
@@ -33,7 +33,7 @@ services:
   - type: cron
     name: media-monitor
     runtime: python
-    plan: professional
+    plan: starter
     schedule: "0 */6 * * *"   # 00:00, 06:00, 12:00, 18:00 UTC  (4 builds/day)
     buildCommand: pip install -r requirements.txt
     startCommand: python media_validator.py
