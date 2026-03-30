@@ -682,6 +682,7 @@ def ensure_schema(conn) -> None:
             "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_score        FLOAT       DEFAULT NULL",
             "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_pickup_at   TIMESTAMPTZ DEFAULT NULL",
             "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_article_url  TEXT        DEFAULT NULL",
+            "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS forecast_peak_at   TIMESTAMP   DEFAULT NULL",
         ]
         for migration in migrations:
             cur.execute(migration)
@@ -772,6 +773,51 @@ def trim_forecast_horizon(da: xr.DataArray) -> xr.DataArray:
     return da
 
 
+def _peak_time_of_extremum(da: "xr.DataArray", find_max: bool = True):
+    """
+    Return the valid_time timestamp at which the spatial-mean of `da` is
+    at its maximum (find_max=True) or minimum (find_max=False).
+    Returns None on any failure.
+    """
+    time_name = None
+    for c in ("valid_time", "time"):
+        if c in da.coords:
+            time_name = c
+            break
+    if time_name is None:
+        return None
+    try:
+        times = pd.to_datetime(da[time_name].values)
+        if len(times) == 0:
+            return None
+        # Average over all spatial dims (lat, lon) — keep time axis only
+        spatial_dims = [d for d in da.dims if d != time_name]
+        ts = da.mean(dim=spatial_dims, skipna=True) if spatial_dims else da
+        idx = int(ts.argmax(dim=time_name).values if find_max else ts.argmin(dim=time_name).values)
+        return pd.Timestamp(times[idx]).to_pydatetime()
+    except Exception:
+        return None
+
+
+# Maps each anomaly type to whether the peak is max or min, and which variable
+_ANOMALY_PEAK_CFG: dict[str, tuple[str, bool]] = {
+    "heatwave":          ("temp",   True),
+    "extreme_heat":      ("temp",   True),
+    "frost":             ("temp",   False),
+    "cold_wave":         ("temp",   False),
+    "ice_storm":         ("temp",   False),
+    "polar_vortex":      ("temp",   False),
+    "wildfire_risk":     ("temp",   True),
+    "heavy_rain":        ("precip", True),
+    "flood_risk":        ("precip", True),
+    "atmospheric_river": ("precip", True),
+    "monsoon_failure":   ("precip", False),
+    "storm_wind":        ("wind",   True),
+    "extreme_wind":      ("wind",   True),
+    "hurricane_risk":    ("wind",   True),
+}
+
+
 def sanitize_details(details: dict) -> dict:
     clean = {}
     for k, v in details.items():
@@ -838,6 +884,12 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
         "wind_ms_max": None,
         "forecast_start": None,
         "forecast_end": None,
+        # Peak-time fields: timestamp of the worst step for each variable
+        "_peak_temp_max_at":    None,   # hottest time step (heat events)
+        "_peak_temp_min_at":    None,   # coldest time step (cold events)
+        "_peak_precip_max_at":  None,   # wettest time step
+        "_peak_precip_min_at":  None,   # driest time step (drought/monsoon)
+        "_peak_wind_max_at":    None,   # windiest time step
     }
 
     ds_temp = normalize_longitudes(main_ds)
@@ -863,6 +915,8 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
         stats["temp_c_min"] = float(t_c.min(skipna=True).values)
         stats["forecast_start"] = pd.Timestamp(times.min()).to_pydatetime()
         stats["forecast_end"] = pd.Timestamp(times.max()).to_pydatetime()
+        stats["_peak_temp_max_at"] = _peak_time_of_extremum(t_c, find_max=True)
+        stats["_peak_temp_min_at"] = _peak_time_of_extremum(t_c, find_max=False)
 
     ds_tp = normalize_longitudes(main_ds)
     tp_name = get_var_name(ds_tp, ["tp", "total_precipitation"])
@@ -875,6 +929,8 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
     if tp_name:
         tp = trim_forecast_horizon(subset_region(ds_tp[tp_name], region))
         stats["precip_mm_7d"] = safe_precip_value_mm(tp)
+        stats["_peak_precip_max_at"] = _peak_time_of_extremum(tp, find_max=True)
+        stats["_peak_precip_min_at"] = _peak_time_of_extremum(tp, find_max=False)
 
         if stats["forecast_start"] is None:
             if "valid_time" in tp.coords:
@@ -894,6 +950,7 @@ def extract_field_stats(main_ds: xr.Dataset, region: dict, source_file: str) -> 
     if wind_name:
         wind = trim_forecast_horizon(subset_region(ds_wind[wind_name], region))
         stats["wind_ms_max"] = float(wind.max(skipna=True).values)
+        stats["_peak_wind_max_at"] = _peak_time_of_extremum(wind, find_max=True)
     else:
         ds_u = None
         ds_v = None
@@ -981,6 +1038,7 @@ def make_signal(
     trade_bias: str,
     forecast_start,
     forecast_end,
+    forecast_peak_at,
     source_file: str,
     details: dict,
 ) -> dict:
@@ -1007,10 +1065,21 @@ def make_signal(
         "what_to_watch_next": "",
         "forecast_start": forecast_start,
         "forecast_end": forecast_end,
+        "forecast_peak_at": forecast_peak_at,
         "source_file": os.path.basename(source_file),
         "details": sanitize_details(details),
         "trend_direction": "new",  # enriched later
     }
+
+
+def _get_peak_at(stats: dict, anomaly_type: str):
+    """Pick the right peak timestamp from stats for this anomaly type."""
+    cfg = _ANOMALY_PEAK_CFG.get(anomaly_type)
+    if cfg is None:
+        return None
+    var, find_max = cfg
+    key = f"_peak_{var}_{'max' if find_max else 'min'}_at"
+    return stats.get(key)
 
 
 def build_signals_from_stats(region: dict, stats: dict, source_file: str) -> list[dict]:
@@ -1026,22 +1095,22 @@ def build_signals_from_stats(region: dict, stats: dict, source_file: str) -> lis
         if temp_c_max is not None and temp_c_max >= RULES["heatwave"]["temp_c_max"]:
             excess = temp_c_max - RULES["heatwave"]["temp_c_max"]
             severity = severity_from_excess(excess, RULES["heatwave"]["severity_step_c"], RULES["heatwave"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "heatwave", temp_c_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("heatwave", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "heatwave", temp_c_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("heatwave", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "heatwave"), source_file, stats))
 
         if temp_c_max is not None and temp_c_max >= RULES["extreme_heat"]["temp_c_max"]:
             excess = temp_c_max - RULES["extreme_heat"]["temp_c_max"]
             severity = severity_from_excess(excess, RULES["extreme_heat"]["severity_step_c"], RULES["extreme_heat"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "extreme_heat", temp_c_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("extreme_heat", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "extreme_heat", temp_c_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("extreme_heat", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "extreme_heat"), source_file, stats))
 
         if temp_c_min is not None and temp_c_min <= RULES["frost"]["temp_c_min"]:
             excess = RULES["frost"]["temp_c_min"] - temp_c_min
             severity = severity_from_excess(excess, RULES["frost"]["severity_step_c"], RULES["frost"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "frost", temp_c_min, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("frost", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "frost", temp_c_min, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("frost", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "frost"), source_file, stats))
 
         if precip_mm_7d is not None and precip_mm_7d >= RULES["heavy_rain"]["precip_mm_7d"]:
             excess = precip_mm_7d - RULES["heavy_rain"]["precip_mm_7d"]
             severity = severity_from_excess(excess, RULES["heavy_rain"]["severity_step_mm"], RULES["heavy_rain"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "heavy_rain", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("heavy_rain", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "heavy_rain", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("heavy_rain", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "heavy_rain"), source_file, stats))
 
         if (
             precip_mm_7d is not None
@@ -1051,17 +1120,17 @@ def build_signals_from_stats(region: dict, stats: dict, source_file: str) -> lis
         ):
             excess = RULES["drought"]["precip_mm_7d_max"] - precip_mm_7d
             severity = severity_from_excess(excess, RULES["drought"]["severity_step_mm"], RULES["drought"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "drought", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("drought", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "drought", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("drought", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "drought"), source_file, stats))
 
         if wind_ms_max is not None and wind_ms_max >= RULES["storm_wind"]["wind_ms_max"]:
             excess = wind_ms_max - RULES["storm_wind"]["wind_ms_max"]
             severity = severity_from_excess(excess, RULES["storm_wind"]["severity_step_ms"], RULES["storm_wind"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "storm_wind", wind_ms_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("storm_wind", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "storm_wind", wind_ms_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("storm_wind", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "storm_wind"), source_file, stats))
 
         if precip_mm_7d is not None and precip_mm_7d >= RULES["flood_risk"]["precip_mm_7d"]:
             excess = precip_mm_7d - RULES["flood_risk"]["precip_mm_7d"]
             severity = severity_from_excess(excess, RULES["flood_risk"]["severity_step_mm"], RULES["flood_risk"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "flood_risk", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("flood_risk", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "flood_risk", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("flood_risk", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "flood_risk"), source_file, stats))
 
         if (
             temp_c_max is not None
@@ -1073,12 +1142,12 @@ def build_signals_from_stats(region: dict, stats: dict, source_file: str) -> lis
         ):
             excess = temp_c_max - RULES["wildfire_risk"]["temp_c_max"]
             severity = severity_from_excess(excess, RULES["wildfire_risk"]["severity_step_c"], RULES["wildfire_risk"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "wildfire_risk", temp_c_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("wildfire_risk", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "wildfire_risk", temp_c_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("wildfire_risk", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "wildfire_risk"), source_file, stats))
 
         if temp_c_min is not None and temp_c_min <= RULES["cold_wave"]["temp_c_min"]:
             excess = RULES["cold_wave"]["temp_c_min"] - temp_c_min
             severity = severity_from_excess(excess, RULES["cold_wave"]["severity_step_c"], RULES["cold_wave"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "cold_wave", temp_c_min, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("cold_wave", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "cold_wave", temp_c_min, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("cold_wave", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "cold_wave"), source_file, stats))
 
         if (
             wind_ms_max is not None
@@ -1088,7 +1157,7 @@ def build_signals_from_stats(region: dict, stats: dict, source_file: str) -> lis
         ):
             excess = wind_ms_max - RULES["hurricane_risk"]["wind_ms_max"]
             severity = severity_from_excess(excess, RULES["hurricane_risk"]["severity_step_ms"], RULES["hurricane_risk"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "hurricane_risk", wind_ms_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("hurricane_risk", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "hurricane_risk", wind_ms_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("hurricane_risk", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "hurricane_risk"), source_file, stats))
 
         # --- New anomaly types ---
 
@@ -1096,13 +1165,13 @@ def build_signals_from_stats(region: dict, stats: dict, source_file: str) -> lis
         if temp_c_min is not None and temp_c_min <= RULES["polar_vortex"]["temp_c_min"]:
             excess = RULES["polar_vortex"]["temp_c_min"] - temp_c_min
             severity = severity_from_excess(excess, RULES["polar_vortex"]["severity_step_c"], RULES["polar_vortex"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "polar_vortex", temp_c_min, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("polar_vortex", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "polar_vortex", temp_c_min, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("polar_vortex", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "polar_vortex"), source_file, stats))
 
         # atmospheric_river: precip >= 200mm/7d
         if precip_mm_7d is not None and precip_mm_7d >= RULES["atmospheric_river"]["precip_mm_7d"]:
             excess = precip_mm_7d - RULES["atmospheric_river"]["precip_mm_7d"]
             severity = severity_from_excess(excess, RULES["atmospheric_river"]["severity_step_mm"], RULES["atmospheric_river"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "atmospheric_river", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("atmospheric_river", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "atmospheric_river", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("atmospheric_river", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "atmospheric_river"), source_file, stats))
 
         # monsoon_failure: precip <= 5mm in peak monsoon months (Jun-Sep) for India/SE Asia/East Africa
         monsoon_regions = {"India", "Southeast Asia", "East Africa", "West Africa Cocoa Belt"}
@@ -1115,7 +1184,7 @@ def build_signals_from_stats(region: dict, stats: dict, source_file: str) -> lis
         ):
             excess = RULES["monsoon_failure"]["precip_mm_7d_max"] - precip_mm_7d
             severity = severity_from_excess(excess, RULES["monsoon_failure"]["severity_step_mm"], RULES["monsoon_failure"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "monsoon_failure", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("monsoon_failure", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "monsoon_failure", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("monsoon_failure", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "monsoon_failure"), source_file, stats))
 
         # ice_storm: temp between -2°C and +2°C AND precip >= 50mm — freezing rain proxy
         if (
@@ -1126,13 +1195,13 @@ def build_signals_from_stats(region: dict, stats: dict, source_file: str) -> lis
         ):
             excess = precip_mm_7d - RULES["ice_storm"]["precip_mm_7d"]
             severity = severity_from_excess(excess, RULES["ice_storm"]["severity_step_mm"], RULES["ice_storm"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "ice_storm", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("ice_storm", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "ice_storm", precip_mm_7d, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("ice_storm", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "ice_storm"), source_file, stats))
 
         # extreme_wind: wind >= 30 m/s (higher tier than storm_wind)
         if wind_ms_max is not None and wind_ms_max >= RULES["extreme_wind"]["wind_ms_max"]:
             excess = wind_ms_max - RULES["extreme_wind"]["wind_ms_max"]
             severity = severity_from_excess(excess, RULES["extreme_wind"]["severity_step_ms"], RULES["extreme_wind"]["base_score"])
-            signals.append(make_signal(region["name"], commodity, "extreme_wind", wind_ms_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("extreme_wind", commodity), stats["forecast_start"], stats["forecast_end"], source_file, stats))
+            signals.append(make_signal(region["name"], commodity, "extreme_wind", wind_ms_max, severity, MARKET_SENSITIVITY.get(commodity, 3), classify_trade_bias("extreme_wind", commodity), stats["forecast_start"], stats["forecast_end"], _get_peak_at(stats, "extreme_wind"), source_file, stats))
 
     return signals
 
@@ -1339,13 +1408,14 @@ def insert_signals(conn, signals: list[dict]) -> None:
                     source_file,
                     forecast_start,
                     forecast_end,
+                    forecast_peak_at,
                     details,
                     trend_direction
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s,
-                    %s, %s, %s, %s::jsonb, %s
+                    %s, %s, %s, %s, %s::jsonb, %s
                 )
                 """,
                 (
@@ -1372,6 +1442,7 @@ def insert_signals(conn, signals: list[dict]) -> None:
                     s["source_file"],
                     s["forecast_start"],
                     s["forecast_end"],
+                    s.get("forecast_peak_at"),
                     json.dumps(s["details"], default=str),
                     s.get("trend_direction", "new"),
                 ),

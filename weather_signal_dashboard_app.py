@@ -2505,21 +2505,25 @@ def show_weather_event_card(
         event_rows["created_at"].min()
         if "created_at" in event_rows.columns else None
     )
-    spotted_str  = _fmt_short_date(first_detected)
-    fcast_start  = _fmt_short_date(best_row.get("forecast_start"))
-    fcast_end    = _fmt_short_date(best_row.get("forecast_end"))
-    if fcast_start and fcast_end and fcast_start != fcast_end:
-        fcast_str = f"{fcast_start} – {fcast_end}"
-    elif fcast_start:
-        fcast_str = fcast_start
-    else:
-        fcast_str = ""
+    spotted_str = _fmt_short_date(first_detected)
+
+    # forecast_peak_at = the specific time step when the anomaly is worst
+    # Only show if it's meaningfully in the future (> 2 days from now)
+    peak_at   = best_row.get("forecast_peak_at")
+    peak_str  = ""
+    try:
+        if peak_at is not None and not pd.isna(peak_at):
+            peak_ts = pd.Timestamp(peak_at)
+            if peak_ts > pd.Timestamp.utcnow().tz_localize(None) + pd.Timedelta(days=2):
+                peak_str = _fmt_short_date(peak_at)
+    except Exception:
+        pass
 
     date_parts = []
     if spotted_str:
         date_parts.append(f'🔍 Spotted&nbsp;<b>{spotted_str}</b>')
-    if fcast_str:
-        date_parts.append(f'📅 Forecast&nbsp;<b>{fcast_str}</b>')
+    if peak_str:
+        date_parts.append(f'⚡ Peaks&nbsp;<b>{peak_str}</b>')
     date_row_html = (
         f'<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:11px;'
         f'color:#666;margin-bottom:10px;">'
@@ -2676,7 +2680,8 @@ df = read_sql(
         media_source,
         media_headline,
         media_pickup_at,
-        media_article_url
+        media_article_url,
+        forecast_peak_at
     FROM weather_global_shocks
     ORDER BY created_at DESC, signal_level DESC, region ASC, commodity ASC
 
