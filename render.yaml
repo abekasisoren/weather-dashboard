@@ -22,10 +22,7 @@ services:
     startCommand: bash run_weather_pipeline.sh
     envVars:
       - key: DATABASE_URL
-        fromService:
-          type: web
-          name: weather-dashboard
-          property: connectionString
+        sync: false   # set manually in Render dashboard (same value as web service)
 
   # ── Media monitor — runs 4x daily to check news for active weather events ──
   # When media picks up a weather event it marks it as confirmed in the DB,
@@ -39,9 +36,6 @@ services:
     startCommand: python media_validator.py
     envVars:
       - key: DATABASE_URL
-        fromService:
-          type: web
-          name: weather-dashboard
-          property: connectionString
+        sync: false   # set manually in Render dashboard (same value as web service)
       - key: NEWSAPI_KEY
-        sync: false   # set on the web service; cron inherits via env group
+        sync: false   # set manually in Render dashboard (same value as web service)
