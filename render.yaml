@@ -2,7 +2,7 @@ services:
   - type: web
     name: weather-dashboard
     runtime: python
-    plan: free
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: bash start_dashboard.sh
 
@@ -17,7 +17,7 @@ services:
   - type: cron
     name: weather-signal-updater
     runtime: python
-    plan: free
+    plan: starter
     schedule: "0 */12 * * *"   # 00:00 and 12:00 UTC daily
     buildCommand: pip install -r requirements.txt
     startCommand: bash run_weather_pipeline.sh
@@ -34,7 +34,7 @@ services:
   - type: cron
     name: media-monitor
     runtime: python
-    plan: free
+    plan: starter
     schedule: "0 */6 * * *"   # 00:00, 06:00, 12:00, 18:00 UTC
     buildCommand: pip install -r requirements.txt
     startCommand: python media_validator.py
@@ -54,7 +54,7 @@ services:
   - type: cron
     name: alt-data-scanner
     runtime: python
-    plan: free
+    plan: starter
     schedule: "0 */4 * * *"   # 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
     buildCommand: pip install -r requirements.txt
     startCommand: python alt_data_monitor.py
@@ -76,7 +76,7 @@ services:
   - type: cron
     name: policy-monitor
     runtime: python
-    plan: free
+    plan: starter
     schedule: "*/15 * * * *"   # every 15 minutes, 24/7
     buildCommand: pip install -r requirements.txt
     startCommand: python policy_monitor.py
@@ -93,7 +93,7 @@ services:
   - type: cron
     name: mining-news-scanner
     runtime: python
-    plan: free
+    plan: starter
     schedule: "0 */2 * * *"   # every 2 hours: 00:00, 02:00, 04:00 … UTC
     buildCommand: pip install -r requirements.txt
     startCommand: python mining_news_monitor.py
