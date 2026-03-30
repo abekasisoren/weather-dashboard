@@ -2385,6 +2385,66 @@ def build_detailed_reasoning(
             st.json(details)
 
 
+# ── Weather-card accent colours: one per anomaly family ──────────────────────
+ANOMALY_ACCENT: dict[str, str] = {
+    "heatwave":          "#E74C3C",
+    "extreme_heat":      "#E74C3C",
+    "frost":             "#5DADE2",
+    "cold_wave":         "#5DADE2",
+    "ice_storm":         "#85C1E9",
+    "polar_vortex":      "#85C1E9",
+    "drought":           "#E67E22",
+    "monsoon_failure":   "#E67E22",
+    "heavy_rain":        "#2ECC71",
+    "flood_risk":        "#1ABC9C",
+    "flood":             "#1ABC9C",
+    "atmospheric_river": "#1ABC9C",
+    "storm_wind":        "#F39C12",
+    "extreme_wind":      "#F39C12",
+    "hurricane_risk":    "#C0392B",
+    "hurricane":         "#C0392B",
+    "tornado":           "#F39C12",
+    "wildfire_risk":     "#E67E22",
+    "wildfire":          "#E74C3C",
+}
+
+
+def compute_trend_streak(region: str, anomaly: str, current_trend: str,
+                         all_df: "pd.DataFrame") -> int:
+    """Count consecutive DB rows (sorted newest-first) sharing the same trend_direction."""
+    mask = (
+        (all_df["region"].str.strip().str.lower() == region.strip().lower()) &
+        (all_df["anomaly_type"].str.strip().str.lower() == anomaly.strip().lower())
+    )
+    history = all_df[mask].sort_values("created_at", ascending=False)
+    streak = 0
+    for _, r in history.iterrows():
+        t = (r.get("trend_direction") or "new").strip().lower()
+        if t == current_trend.strip().lower():
+            streak += 1
+        else:
+            break
+    return max(streak, 1)
+
+
+def _fmt_short_date(val) -> str:
+    """Format a DB date/datetime/NaT/string into 'Mar 28' style. Returns '' on failure."""
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except Exception:
+        pass
+    try:
+        if hasattr(val, "strftime"):
+            return val.strftime("%-d %b")
+        s = str(val)[:10]
+        return datetime.strptime(s, "%Y-%m-%d").strftime("%-d %b")
+    except Exception:
+        return ""
+
+
 def show_weather_event_card(
     event_rows: "pd.DataFrame",
     rank_number: int,
@@ -2392,251 +2452,164 @@ def show_weather_event_card(
     owned_symbols: "set | None" = None,
     cooldown_combos: "set | None" = None,
 ):
-    """
-    Radar card focused on the weather EVENT (region + anomaly type).
-    Shows all affected equities across every commodity in the event group,
-    ranked by their individual trading scores.
-
-    owned_symbols  — if provided, only stocks in this set are shown (cross-event
-                     ownership: each stock appears in only its highest-scoring event).
-    cooldown_combos — set of (symbol, region, anomaly) tuples logged in last 24h;
-                      matching stocks get a 🔁 COOLDOWN badge.
-    """
-    best_row = event_rows.sort_values("signal_level", ascending=False).iloc[0]
-
-    region    = normalize_text(best_row.get("region", ""), "—").replace("_", " ").title()
+    """Radar card — Block 1: pure weather event. No stock recommendations."""
+    best_row    = event_rows.sort_values("signal_level", ascending=False).iloc[0]
     anomaly_raw = normalize_text(best_row.get("anomaly_type", ""), "—")
-    anomaly   = anomaly_raw.replace("_", " ").title()
-    trend_dir = normalize_text(best_row.get("trend_direction", ""), "new")
-    media_val         = best_row.get("media_validated")
-    media_headline_val = best_row.get("media_headline", "") or ""
-    media_source_val   = best_row.get("media_source", "") or ""
-    media_article_url  = best_row.get("media_article_url", "") or ""
-    media_pickup_at    = best_row.get("media_pickup_at")
-    region_raw  = normalize_text(best_row.get("region", ""), "").strip()
-    anomaly_key_raw = anomaly_raw.strip()
+    anomaly     = anomaly_raw.replace("_", " ").title()
+    anomaly_key = normalize_anomaly_key(anomaly_raw)
+    region      = normalize_text(best_row.get("region", ""), "—").replace("_", " ").title()
+    trend_dir   = normalize_text(best_row.get("trend_direction", ""), "new")
 
-    # Weather-level scoring (shared by all stocks in this event)
+    # ── Scores (weather-only) ─────────────────────────────────────────────────
     weather_strength  = compute_weather_strength(best_row)
     seasonality_score = compute_seasonality_score(best_row)
     trend_factor      = compute_trend_factor(best_row)
     edge_score        = compute_edge_score(best_row)
-    anomaly_key       = normalize_anomaly_key(anomaly_raw)
     conf_bonus        = compute_confluence_bonus(all_df, anomaly_key)
-    # Z-score for display badge on card header
     event_sigma       = compute_anomaly_zscore(best_row)
+    event_score       = round(weather_strength, 1)
+    bucket            = score_bucket(int(round(event_score)))
+    severity          = float(best_row.get("severity_score") or 0)
+    sev_pct           = min(int(severity * 10), 100)
+    # Media fields (used in expander / Block 3)
+    media_article_url  = best_row.get("media_article_url", "") or ""
+    media_headline_val = best_row.get("media_headline", "") or ""
+    media_source_val   = best_row.get("media_source", "") or ""
+    media_pickup_ago   = ""
+    # Stock list stub — populated in Block 2 (not rendered yet)
+    stock_list: list = []
 
-    # Collect affected stocks — respecting cross-event ownership filter
-    stock_list = []
-    seen_symbols: set = set()
-    for _, row in event_rows.iterrows():
-        trade, symbols = get_stock_trade_symbols(row)
-        if not symbols or trade == "No Trade":
-            continue
-        commodity_label = normalize_text(row.get("commodity", ""), "")
-        # Per-commodity phenological multiplier — adjusts score by crop stage sensitivity
-        pheno_mult, pheno_stage = compute_phenological_multiplier(row)
-        for sym in symbols:
-            if sym in seen_symbols:
-                continue
-            # Cross-event ownership: skip if this symbol belongs to a higher-scoring event
-            if owned_symbols is not None and sym not in owned_symbols:
-                continue
-            seen_symbols.add(sym)
-            mq = compute_mapping_quality(row, sym, trade)
-            eq = compute_execution_quality(row, sym)
-            score = compute_final_trade_score(
-                weather_strength=weather_strength,
-                mapping_quality=mq,
-                conflict_cleanliness=10.0,
-                execution_quality=eq,
-                seasonality_score=seasonality_score,
-                trend_factor=trend_factor,
-                edge_score=edge_score,
-                confluence_bonus=conf_bonus,
-                pheno_multiplier=pheno_mult,
-            )
-            candidate = get_symbol_candidate(row, sym, trade.lower()) or {}
-            role = candidate.get("role", commodity_label).replace("_", " ")
-            # Cooldown check: was this (symbol, region, anomaly) logged in last 24h?
-            on_cooldown = (
-                cooldown_combos is not None
-                and (sym, region_raw, anomaly_key_raw) in cooldown_combos
-            )
-            stock_list.append({
-                "symbol": sym,
-                "direction": trade,
-                "score": round(score, 1),
-                "role": role,
-                "commodity": commodity_label,
-                "pheno_stage": pheno_stage,
-                "pheno_mult": pheno_mult,
-                "cooldown": on_cooldown,
-            })
-
-    # Sort stocks by score descending
-    stock_list.sort(key=lambda x: x["score"], reverse=True)
-
-    # Event-level score = top stock score (or weather strength if no stocks)
-    event_score = stock_list[0]["score"] if stock_list else round(weather_strength, 1)
-    bucket      = score_bucket(int(round(event_score)))
-
-    # Commodities this event covers
+    # ── Commodities ───────────────────────────────────────────────────────────
     commodities = sorted({
         normalize_text(r.get("commodity", ""), "")
         for _, r in event_rows.iterrows()
         if normalize_text(r.get("commodity", ""), "")
     })
-
-    # Explanation from the best row
-    why = get_why_it_matters(best_row)
-
-    # Accent colour: green if mostly longs, red if mostly shorts, amber if mixed
-    n_long  = sum(1 for s in stock_list if s["direction"] == "Long")
-    n_short = sum(1 for s in stock_list if s["direction"] == "Short")
-    if n_long >= n_short and n_long:
-        accent = "#2ECC71"
-    elif n_short > n_long:
-        accent = "#E74C3C"
-    else:
-        accent = "#F39C12"
-
-    trend_map = {
-        "worsening":  "↑ Worsening",
-        "new":        "★ New",
-        "stable":     "→ Stable",
-        "recovering": "↓ Recovering",
-    }
-    trend_label  = trend_map.get(trend_dir, trend_dir.title())
-    rank_str     = f"#{rank_number}" if rank_number else ""
-    media_str    = "&nbsp;&nbsp;📰 CONFIRMED" if media_val is True else ""
-    score_pct    = min(int(event_score * 10), 100)
-
-    # ── Media pickup time-ago label ────────────────────────────────────────────
-    media_pickup_ago = ""
-    if media_val is True and media_pickup_at is not None:
-        try:
-            from datetime import timezone as _tz
-            if hasattr(media_pickup_at, "tzinfo") and media_pickup_at.tzinfo:
-                delta = datetime.now(_tz.utc) - media_pickup_at
-            else:
-                delta = datetime.utcnow() - media_pickup_at
-            hours = int(delta.total_seconds() / 3600)
-            if hours < 2:
-                media_pickup_ago = "just now"
-            elif hours < 24:
-                media_pickup_ago = f"{hours}h ago"
-            else:
-                media_pickup_ago = f"{hours // 24}d ago"
-        except Exception:
-            media_pickup_ago = ""
     commodities_str = "  ·  ".join(commodities)
 
-    # Sigma badge — colour ramps from grey (1σ) to amber (2σ) to red (3σ)
-    if event_sigma >= 2.5:
-        sigma_color = "#E74C3C"   # red — extreme
-    elif event_sigma >= 1.8:
-        sigma_color = "#F39C12"   # amber — significant
-    elif event_sigma >= 1.2:
-        sigma_color = "#5DADE2"   # blue — notable
+    # ── Trend + streak ────────────────────────────────────────────────────────
+    trend_cfg = {
+        "worsening":  ("↑", "WORSENING", "#E74C3C"),
+        "new":        ("★", "NEW",        "#F39C12"),
+        "stable":     ("→", "STABLE",     "#888888"),
+        "recovering": ("↓", "RECOVERING", "#2ECC71"),
+    }
+    t_icon, t_label, t_color = trend_cfg.get(trend_dir, ("★", "NEW", "#F39C12"))
+    streak     = compute_trend_streak(
+        best_row.get("region", ""), anomaly_raw, trend_dir, all_df
+    )
+    streak_str = f"&nbsp;<span style='color:#555;font-size:9px;'>{streak}d</span>" if streak > 1 else ""
+
+    # ── Dates ─────────────────────────────────────────────────────────────────
+    first_detected = (
+        event_rows["created_at"].min()
+        if "created_at" in event_rows.columns else None
+    )
+    spotted_str  = _fmt_short_date(first_detected)
+    fcast_start  = _fmt_short_date(best_row.get("forecast_start"))
+    fcast_end    = _fmt_short_date(best_row.get("forecast_end"))
+    if fcast_start and fcast_end and fcast_start != fcast_end:
+        fcast_str = f"{fcast_start} – {fcast_end}"
+    elif fcast_start:
+        fcast_str = fcast_start
     else:
-        sigma_color = "#555"      # grey — marginal
+        fcast_str = ""
+
+    date_parts = []
+    if spotted_str:
+        date_parts.append(f'🔍 Spotted&nbsp;<b>{spotted_str}</b>')
+    if fcast_str:
+        date_parts.append(f'📅 Forecast&nbsp;<b>{fcast_str}</b>')
+    date_row_html = (
+        f'<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:11px;'
+        f'color:#666;margin-bottom:10px;">'
+        + "&nbsp;&nbsp;·&nbsp;&nbsp;".join(date_parts)
+        + "</div>"
+    ) if date_parts else ""
+
+    # ── Confluence badge ──────────────────────────────────────────────────────
+    n_regions   = all_df[
+        all_df["anomaly_type"].str.strip().str.lower() == anomaly_key
+    ]["region"].nunique()
+    conf_badge  = (
+        f'&nbsp;<span style="font-size:9px;font-weight:700;color:#F39C12;'
+        f'border:1px solid #F39C12;border-radius:3px;padding:1px 4px;">'
+        f'⚡ {n_regions} REGIONS</span>'
+    ) if n_regions >= 3 else ""
+
+    # ── Media confirmed badge (small, header only) ────────────────────────────
+    media_val = best_row.get("media_validated")
+    media_badge = (
+        '&nbsp;<span style="font-size:9px;font-weight:700;color:#fb923c;'
+        'border:1px solid #fb923c;border-radius:3px;padding:1px 4px;">📰 IN MEDIA</span>'
+    ) if media_val is True else ""
+
+    # ── Accent: weather-family colour ─────────────────────────────────────────
+    accent = ANOMALY_ACCENT.get(anomaly_key, "#F39C12")
+
+    # ── Sigma badge ───────────────────────────────────────────────────────────
+    if event_sigma >= 2.5:
+        sigma_color = "#E74C3C"
+    elif event_sigma >= 1.8:
+        sigma_color = "#F39C12"
+    elif event_sigma >= 1.2:
+        sigma_color = "#5DADE2"
+    else:
+        sigma_color = "#555"
     sigma_badge = (
         f'<span style="font-size:9px;font-weight:700;color:{sigma_color};'
         f'border:1px solid {sigma_color};border-radius:3px;padding:1px 4px;'
-        f'margin-left:6px;letter-spacing:0.5px;">{event_sigma:.1f}σ</span>'
+        f'margin-left:6px;">{event_sigma:.1f}σ</span>'
     )
 
-    # Build individual stock rows
-    stock_rows_html = ""
-    for s in stock_list[:10]:
-        d_color  = "#2ECC71" if s["direction"] == "Long" else "#E74C3C"
-        d_arrow  = "▲" if s["direction"] == "Long" else "▼"
-        # Cooldown indicator: greyed out with 🔁 when same (sym+region+anomaly) was logged <24h ago
-        if s.get("cooldown"):
-            sym_color   = "#555"
-            score_color = "#444"
-            cd_badge    = '<span style="font-size:9px;color:#444;margin-left:4px;">🔁</span>'
-        else:
-            sym_color   = "#f0f0f0"
-            score_color = d_color
-            cd_badge    = ""
-        # Phenological stage badge: show when multiplier is materially high or low
-        pm = s.get("pheno_mult", 1.0)
-        ps = s.get("pheno_stage", "")
-        if ps and pm >= 1.6:
-            pheno_badge = (
-                f'<span style="font-size:8px;font-weight:700;color:#F39C12;'
-                f'border:1px solid #F39C12;border-radius:2px;padding:0px 3px;'
-                f'margin-left:4px;white-space:nowrap;">🌱 {ps.upper()}</span>'
-            )
-        elif ps and pm <= 0.5:
-            pheno_badge = (
-                f'<span style="font-size:8px;color:#444;'
-                f'border:1px solid #333;border-radius:2px;padding:0px 3px;'
-                f'margin-left:4px;white-space:nowrap;">💤 {ps.upper()}</span>'
-            )
-        else:
-            pheno_badge = ""
-        stock_rows_html += (
-            f'<div style="display:flex;align-items:center;gap:8px;padding:3px 0;'
-            f'border-bottom:1px solid rgba(255,255,255,0.06);">'
-            f'<span style="color:{d_color};font-size:10px;font-weight:900;width:12px;flex-shrink:0;">{d_arrow}</span>'
-            f'<span style="font-family:monospace;font-size:12px;font-weight:700;color:{sym_color};width:48px;flex-shrink:0;">{s["symbol"]}</span>'
-            f'<span style="font-size:11px;font-weight:700;color:{score_color};width:28px;flex-shrink:0;">{s["score"]:.1f}</span>'
-            f'<span style="font-size:10px;color:#777;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">{s["role"]}</span>'
-            f'{pheno_badge}{cd_badge}'
-            f'</div>'
-        )
+    why = get_why_it_matters(best_row)
 
     card_html = (
-        # Explicit dark background so text colours are always correct regardless of Streamlit theme
         f'<div style="border-left:3px solid {accent};border-radius:6px;'
-        f'background:#16181D;padding:16px 18px 14px 18px;'
-        f'margin-bottom:2px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
+        f'background:#16181D;padding:16px 18px 14px 18px;margin-bottom:2px;'
+        f'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
 
-        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">'
+        # Header: rank + bucket + badges | score + sigma
+        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">'
         f'<span style="font-size:10px;font-weight:700;color:#777;letter-spacing:1px;text-transform:uppercase;">'
-        f'{rank_str}&nbsp;&nbsp;{bucket}{media_str}</span>'
+        f'#{rank_number}&nbsp;&nbsp;{bucket}{media_badge}</span>'
         f'<div style="text-align:right;line-height:1;">'
         f'<span style="font-size:26px;font-weight:700;color:{accent};">{event_score:.1f}</span>'
         f'<span style="font-size:11px;color:#555;">&thinsp;/10</span>'
         f'{sigma_badge}'
         f'</div></div>'
 
-        f'<div style="font-size:17px;font-weight:700;color:#E8E8E8;margin-bottom:2px;">{region}</div>'
-        f'<div style="font-size:13px;font-weight:700;color:{accent};letter-spacing:0.3px;margin-bottom:4px;">{anomaly}</div>'
-        f'<div style="font-size:11px;color:#666;margin-bottom:10px;">'
-        f'<span style="color:#888;">{trend_label}</span>&nbsp;&nbsp;·&nbsp;&nbsp;{commodities_str}</div>'
+        # Anomaly (big) + trend badge + streak
+        f'<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:3px;flex-wrap:wrap;">'
+        f'<span style="font-size:17px;font-weight:800;color:{accent};letter-spacing:0.2px;">{anomaly}</span>'
+        f'<span style="font-size:10px;font-weight:700;color:{t_color};">'
+        f'{t_icon}&nbsp;{t_label}{streak_str}</span>'
+        f'{conf_badge}'
+        f'</div>'
 
-        f'<div style="font-size:12px;color:#888;line-height:1.7;margin-bottom:12px;">{why}</div>'
+        # Region
+        f'<div style="font-size:15px;font-weight:700;color:#E8E8E8;margin-bottom:3px;">{region}</div>'
 
-        f'<div style="background:#2a2a2a;border-radius:3px;height:2px;margin-bottom:12px;">'
-        f'<div style="background:{accent};width:{score_pct}%;height:2px;border-radius:3px;"></div></div>'
+        # Commodities
+        + (f'<div style="font-size:11px;color:#555;margin-bottom:10px;">{commodities_str}</div>'
+           if commodities_str else '<div style="margin-bottom:10px;"></div>')
 
-        f'<div style="font-size:9px;font-weight:700;color:#555;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;">AFFECTED MARKETS</div>'
-        + stock_rows_html
-        + (
-            # ── EXIT SIGNAL banner — shown when media confirms the event ──────
-            f'<div style="margin-top:12px;padding:10px 12px;'
-            f'background:rgba(124,45,18,0.35);border-left:3px solid #f97316;border-radius:4px;">'
-            f'<div style="font-size:11px;font-weight:700;color:#fed7aa;letter-spacing:0.5px;margin-bottom:3px;">'
-            f'📰 MEDIA CONFIRMED — EXIT WINDOW OPEN</div>'
-            + (f'<div style="font-size:10px;color:#fdba74;margin-bottom:4px;">{media_headline_val[:120]}</div>'
-               if media_headline_val else "")
-            + (f'<a href="{media_article_url}" target="_blank" '
-               f'style="font-size:9px;color:#fb923c;text-decoration:none;">'
-               f'{media_source_val}'
-               + (f" · {media_pickup_ago}" if media_pickup_ago else "")
-               + f' → Read article</a>'
-               if media_article_url else
-               f'<span style="font-size:9px;color:#fb923c;">'
-               f'{media_source_val}'
-               + (f" · {media_pickup_ago}" if media_pickup_ago else "")
-               + f'</span>')
-            + f'</div>'
-            if media_val is True else ""
-        )
+        # Dates row
+        + date_row_html
+
+        # Severity bar
+        + f'<div style="margin-bottom:12px;">'
+        f'<div style="display:flex;justify-content:space-between;font-size:9px;color:#555;'
+        f'text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">'
+        f'<span>Severity</span><span style="color:#777;">{severity:.0f} / 10</span></div>'
+        f'<div style="background:#2a2a2a;border-radius:3px;height:3px;">'
+        f'<div style="background:{accent};width:{sev_pct}%;height:3px;border-radius:3px;"></div></div>'
+        f'</div>'
+
+        # Why it matters
+        + (f'<div style="font-size:12px;color:#888;line-height:1.7;">{why}</div>'
+           if why else "")
+
         + f'</div>'
     )
     st.markdown(card_html, unsafe_allow_html=True)
