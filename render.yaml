@@ -1,40 +1,28 @@
 services:
-  - type: web
-    name: weather-dashboard
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: bash start_dashboard.sh
-
   # ── Weather signal pipeline — runs every 12 hours ────────────────────────────
-  # Step 1: update_weather_values.py  — downloads latest ECMWF Open Data GRIB2
-  #         files (free, no API key) from 4 CDN mirrors; writes weather_history.csv
-  # Step 2: generate_signals.py       — reads weather_history.csv → DB (fast signals)
-  # Step 3: generate_global_shocks.py — reads GRIB directly → DB (anomaly signals)
-  # Step 4: rm *.grib2                — cleans up large GRIB files (~18 MB each)
-  # ECMWF publishes new forecasts at 00/06/12/18 UTC; 12h cadence = 2 builds/day
+  # Steps: ECMWF GRIB download → generate_signals.py → generate_global_shocks.py
+  # Cleans up *.grib2 files after each run. 2 builds/day.
   - type: cron
     name: weather-signal-updater
     runtime: python
     plan: starter
-    schedule: "0 */12 * * *"   # 00:00 and 12:00 UTC daily  (2 builds/day)
+    schedule: "0 */12 * * *"   # 00:00 and 12:00 UTC daily
     buildCommand: pip install -r requirements.txt
     startCommand: bash run_weather_pipeline.sh
     envVars:
       - key: DATABASE_URL
-        sync: false   # set manually in Render dashboard (same value as web service)
+        sync: false
 
-  # ── Media monitor — runs 4x daily to check news for active weather events ──
-  # When media picks up a weather event it marks it as confirmed in the DB,
-  # triggering the EXIT SIGNAL banner on the Radar card.
+  # ── Media monitor — 4x daily ─────────────────────────────────────────────────
   - type: cron
     name: media-monitor
     runtime: python
     plan: starter
-    schedule: "0 */6 * * *"   # 00:00, 06:00, 12:00, 18:00 UTC  (4 builds/day)
+    schedule: "0 */6 * * *"   # 00:00, 06:00, 12:00, 18:00 UTC
     buildCommand: pip install -r requirements.txt
     startCommand: python media_validator.py
     envVars:
       - key: DATABASE_URL
-        sync: false   # set manually in Render dashboard (same value as web service)
+        sync: false
       - key: NEWSAPI_KEY
-        sync: false   # set manually in Render dashboard (same value as web service)
+        sync: false
