@@ -2,7 +2,6 @@ services:
   - type: web
     name: weather-dashboard
     runtime: python
-    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: bash start_dashboard.sh
 
