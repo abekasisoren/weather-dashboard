@@ -2445,6 +2445,236 @@ def _fmt_short_date(val) -> str:
         return ""
 
 
+def _stock_chip(sym: str, fg: str, is_primary: bool = False) -> str:
+    """Inline HTML pill for a stock ticker symbol inside a recommendation card."""
+    border = f"1px solid {fg}" if is_primary else "1px solid #333"
+    size   = "12px"            if is_primary else "10px"
+    weight = "800"             if is_primary else "600"
+    return (
+        f'<span style="display:inline-block;padding:2px 8px;border-radius:999px;'
+        f'border:{border};color:{fg};font-size:{size};font-weight:{weight};'
+        f'margin:2px 3px;">{sym}</span>'
+    )
+
+
+def show_recommendation_card(
+    event_rows: "pd.DataFrame",
+    rank: int,
+    all_df: "pd.DataFrame",
+) -> None:
+    """
+    Recommendation card — one per weather event, all affected equities inside.
+    Bridge between Radar (weather) and Pulse Trader (stocks).
+    """
+    best_row    = event_rows.sort_values("signal_level", ascending=False).iloc[0]
+    anomaly_raw = normalize_text(best_row.get("anomaly_type", ""), "—")
+    anomaly     = anomaly_raw.replace("_", " ").title()
+    anomaly_key = normalize_anomaly_key(anomaly_raw)
+    region      = normalize_text(best_row.get("region", ""), "—")
+    trend_dir   = normalize_text(best_row.get("trend_direction", ""), "new").lower()
+    trade_bias  = normalize_text(best_row.get("trade_bias", ""), "").lower()
+    weather_str = compute_weather_strength(best_row)
+    score_pct   = int(min(100, max(0, weather_str * 10)))
+    accent      = ANOMALY_ACCENT.get(anomaly_key, "#F39C12")
+    why         = get_why_it_matters(best_row)
+
+    # ── Stocks ────────────────────────────────────────────────────────────────
+    vehicle          = get_vehicle(best_row)
+    direction, syms  = get_stock_trade_symbols(best_row)
+
+    # ── Direction badge ───────────────────────────────────────────────────────
+    if "long" in trade_bias or direction == "Long":
+        trade_label, trade_fg, trade_bg = "BUY",  "#2ECC71", "#145a32"
+        border_col = "#2ECC71"
+    elif "short" in trade_bias or direction == "Short":
+        trade_label, trade_fg, trade_bg = "SELL", "#E74C3C", "#641e16"
+        border_col = "#E74C3C"
+    else:
+        trade_label, trade_fg, trade_bg = "WATCH", "#F39C12", "#4a3000"
+        border_col = "#F39C12"
+
+    # ── Conviction badge ──────────────────────────────────────────────────────
+    bucket = normalize_text(
+        best_row.get("signal_bucket"),
+        score_bucket(safe_int(best_row.get("signal_level"))),
+    ).upper()
+    conv_styles = {
+        "PRIME":      ("#4c1d95", "#e9d5ff"),
+        "ACTIONABLE": ("#14532d", "#bbf7d0"),
+        "WATCHING":   ("#78350f", "#fde68a"),
+        "EARLY":      ("#334155", "#cbd5e1"),
+    }
+    conv_bg, conv_fg = conv_styles.get(bucket, conv_styles["EARLY"])
+
+    # ── Trend badge ───────────────────────────────────────────────────────────
+    trend_cfg_rec = {
+        "worsening":  ("↑", "WORSENING", "#E74C3C"),
+        "new":        ("★", "NEW",        "#F39C12"),
+        "stable":     ("→", "STABLE",     "#888888"),
+        "recovering": ("↓", "RECOVERING", "#2ECC71"),
+    }
+    t_icon, t_label, t_color = trend_cfg_rec.get(trend_dir, ("★", "NEW", "#F39C12"))
+
+    # ── Dates (same logic as show_weather_event_card) ─────────────────────────
+    now_ts = pd.Timestamp.utcnow().tz_localize(None)
+    first_detected = (
+        event_rows["created_at"].min() if "created_at" in event_rows.columns else None
+    )
+    last_updated = (
+        event_rows["created_at"].max() if "created_at" in event_rows.columns else None
+    )
+    spotted_str = _fmt_short_date(first_detected)
+
+    updated_str = ""
+    try:
+        if last_updated is not None and not pd.isna(last_updated):
+            last_ts  = pd.Timestamp(last_updated)
+            first_ts = pd.Timestamp(first_detected)
+            if (last_ts - first_ts).total_seconds() > 86400:
+                days_ago = int((now_ts - last_ts).total_seconds() / 86400)
+                updated_str = (
+                    "today" if days_ago == 0
+                    else "yesterday" if days_ago == 1
+                    else f"{days_ago}d ago"
+                )
+    except Exception:
+        pass
+
+    peak_at  = best_row.get("forecast_peak_at")
+    peak_str = ""
+    try:
+        if peak_at is not None and not pd.isna(peak_at):
+            peak_ts = pd.Timestamp(peak_at)
+            if peak_ts > now_ts + pd.Timedelta(days=1):
+                peak_str = _fmt_short_date(peak_at)
+        if not peak_str:
+            fe = best_row.get("forecast_end")
+            if fe is not None and not pd.isna(fe):
+                fe_ts = pd.Timestamp(fe)
+                if fe_ts > now_ts + pd.Timedelta(days=1):
+                    peak_str = _fmt_short_date(fe)
+    except Exception:
+        pass
+
+    date_parts = []
+    if spotted_str:
+        date_parts.append(f'🔍 Spotted&nbsp;<b>{spotted_str}</b>')
+    if updated_str:
+        date_parts.append(f'↻ Updated&nbsp;<b>{updated_str}</b>')
+    if peak_str:
+        date_parts.append(f'⚡ Forecast&nbsp;<b>{peak_str}</b>')
+    date_row_html = (
+        f'<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:11px;'
+        f'color:#666;margin-bottom:10px;">'
+        + "&nbsp;&nbsp;·&nbsp;&nbsp;".join(date_parts)
+        + "</div>"
+    ) if date_parts else ""
+
+    # ── Stock chips HTML ──────────────────────────────────────────────────────
+    chip_rows_html = ""
+    all_long_syms  = []
+    all_short_syms = []
+
+    if trade_label == "BUY":
+        if vehicle:
+            all_long_syms.append((vehicle, True))   # (sym, is_primary)
+        for s in syms:
+            if s != vehicle:
+                all_long_syms.append((s, False))
+    elif trade_label == "SELL":
+        if vehicle:
+            all_short_syms.append((vehicle, True))
+        for s in syms:
+            if s != vehicle:
+                all_short_syms.append((s, False))
+    else:
+        # WATCH — just list all
+        if vehicle:
+            all_long_syms.append((vehicle, True))
+        for s in syms:
+            if s != vehicle:
+                all_long_syms.append((s, False))
+
+    if all_long_syms or all_short_syms:
+        chip_rows_html = (
+            '<div style="border-top:1px solid #2a2a2a;margin-top:10px;padding-top:8px;">'
+            '<div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;'
+            'color:#555;margin-bottom:6px;">Affected Stocks</div>'
+        )
+        if all_long_syms:
+            label_color = "#2ECC71" if trade_label == "BUY" else "#F39C12"
+            chip_label  = "🟢 BUY:" if trade_label == "BUY" else "WATCH:"
+            chip_rows_html += (
+                f'<div style="margin-bottom:4px;font-size:10px;color:{label_color};'
+                f'font-weight:700;">{chip_label}&nbsp;'
+                + "".join(_stock_chip(s, label_color, primary) for s, primary in all_long_syms)
+                + "</div>"
+            )
+        if all_short_syms:
+            chip_rows_html += (
+                '<div style="margin-bottom:4px;font-size:10px;color:#E74C3C;font-weight:700;">'
+                "🔴 SELL:&nbsp;"
+                + "".join(_stock_chip(s, "#E74C3C", primary) for s, primary in all_short_syms)
+                + "</div>"
+            )
+        chip_rows_html += "</div>"
+
+    # ── Card HTML ─────────────────────────────────────────────────────────────
+    card_html = (
+        f'<div style="border-left:3px solid {border_col};border-radius:6px;'
+        f'background:#16181D;padding:16px 18px 14px 18px;margin-bottom:2px;'
+        f'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
+
+        # Row 1: rank | BUY/SELL pill | CONVICTION pill
+        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;'
+        f'margin-bottom:8px;">'
+        f'<span style="font-size:10px;font-weight:700;color:#777;'
+        f'letter-spacing:1px;text-transform:uppercase;">#{rank}</span>'
+        f'<div style="display:flex;gap:6px;align-items:center;">'
+        f'<span style="background:{trade_bg};color:{trade_fg};padding:3px 10px;'
+        f'border-radius:999px;font-weight:800;font-size:11px;">{trade_label}</span>'
+        f'<span style="background:{conv_bg};color:{conv_fg};padding:3px 10px;'
+        f'border-radius:999px;font-weight:700;font-size:10px;">{bucket}</span>'
+        f'</div>'
+        f'</div>'
+
+        # Row 2: anomaly bold · region  + trend badge
+        f'<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px;flex-wrap:wrap;">'
+        f'<span style="font-size:15px;font-weight:800;color:{accent};">{anomaly}</span>'
+        f'<span style="font-size:12px;color:#aaa;">·&nbsp;{region}</span>'
+        f'<span style="font-size:10px;font-weight:700;color:{t_color};">'
+        f'{t_icon}&nbsp;{t_label}</span>'
+        f'</div>'
+
+        # Row 3: dates
+        + date_row_html
+
+        # Row 4: score bar
+        + f'<div style="margin-bottom:8px;">'
+        f'<div style="display:flex;justify-content:space-between;font-size:9px;'
+        f'color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px;">'
+        f'<span>Weather Strength</span>'
+        f'<span style="color:{border_col};font-weight:700;">{weather_str:.1f}&nbsp;/&nbsp;10</span>'
+        f'</div>'
+        f'<div style="background:#2a2a2a;border-radius:3px;height:4px;">'
+        f'<div style="background:{border_col};width:{score_pct}%;height:4px;border-radius:3px;"></div>'
+        f'</div>'
+        f'</div>'
+
+        # Row 5: why it matters (2-line clamp)
+        + (f'<div style="font-size:12px;color:#888;line-height:1.5;'
+           f'display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;'
+           f'overflow:hidden;margin-bottom:4px;">{why}</div>'
+           if why else "")
+
+        # Row 6: stock chips
+        + chip_rows_html
+
+        + f'</div>'
+    )
+    st.markdown(card_html, unsafe_allow_html=True)
+
+
 def show_weather_event_card(
     event_rows: "pd.DataFrame",
     rank_number: int,
@@ -2943,13 +3173,31 @@ worsening_count = int((df["trend_direction"] == "worsening").sum())
 new_count = int((df["trend_direction"] == "new").sum())
 anomaly_coverage = df["anomaly_type"].nunique()
 
+# ─── Pre-compute pulse table (shared by Recommendations + Pulse Trader tabs) ──
+pulse_table = build_global_pulse_trader_table(filtered.copy())
+
+def _entry_gate(row) -> str:
+    trend = str(row.get("Trend", "")).lower()
+    if "worsening" in trend or "escalating" in trend:
+        return "🟢 Enter — Escalating"
+    if "new" in trend:
+        return "🟢 Enter — New Signal"
+    if "stable" in trend:
+        return "🟡 Monitor"
+    if "recovering" in trend or "de-escalating" in trend:
+        return "🔴 Avoid — Fading"
+    return "🟡 Monitor"
+
+if not pulse_table.empty:
+    pulse_table["Entry Gate"] = pulse_table.apply(_entry_gate, axis=1)
+
 # ─── Tab layout ───────────────────────────────────────────────────────────────
 
 st.title("Global Weather Signal Dashboard")
 st.caption("Early weather intelligence for markets ranked like a trading radar.")
 
-tab_radar, tab_pulse, tab_media, tab_aftermath = st.tabs([
-    "🌍 Radar", "📊 Pulse Trader", "📡 Media Signals", "📈 Aftermath"
+tab_radar, tab_recs, tab_pulse, tab_media, tab_aftermath = st.tabs([
+    "🌍 Radar", "📋 Recommendations", "📊 Pulse Trader", "📡 Media Signals", "📈 Aftermath"
 ])
 
 with tab_radar:
@@ -3170,12 +3418,82 @@ with tab_radar:
             available_cols = [c for c in display_cols if c in filtered_ranked.columns]
             st.dataframe(filtered_ranked[available_cols], use_container_width=True, height=380)
 
+
+with tab_recs:
+    st.header("📋 Stock Recommendations")
+    st.caption(
+        "One card per weather event — all affected equities and ETFs listed inside, "
+        "ranked by weather strength."
+    )
+
+    if filtered.empty:
+        st.info("No recommendations match the current filters.")
+    else:
+        # ── KPI bar ───────────────────────────────────────────────────────────
+        _tb_total = filtered["anomaly_type"].nunique()
+        _tb_long  = int((filtered["trade_bias"].str.lower() == "long").sum())
+        _tb_short = int((filtered["trade_bias"].str.lower() == "short").sum())
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.metric("Weather Events", _tb_total)
+        rc2.metric("🟢 Long setups",  _tb_long)
+        rc3.metric("🔴 Short setups", _tb_short)
+        st.divider()
+
+        # ── Build ranked group list (same groupby as Radar tab) ───────────────
+        _rec_groups = {}
+        for _, row in filtered.iterrows():
+            key = (
+                normalize_text(row.get("region", ""), ""),
+                normalize_text(row.get("anomaly_type", ""), ""),
+            )
+            _rec_groups.setdefault(key, []).append(row)
+
+        # Sort groups by best weather_strength of the lead row
+        _rec_sorted = sorted(
+            [
+                (
+                    compute_weather_strength(
+                        max(rows, key=lambda r: safe_int(r.get("signal_level")))
+                    ),
+                    key,
+                    rows,
+                )
+                for key, rows in _rec_groups.items()
+            ],
+            key=lambda x: x[0],
+            reverse=True,
+        )
+
+        # Filter to events that have at least one stock recommendation
+        _rendered = []
+        for _ws_val, (reg, anom), rows in _rec_sorted:
+            _best_r = max(rows, key=lambda r: safe_int(r.get("signal_level")))
+            _veh    = get_vehicle(_best_r)
+            _, _sym = get_stock_trade_symbols(_best_r)
+            if not _veh and not _sym:
+                continue
+            _ev_df = pd.DataFrame(rows)
+            _rendered.append((_ev_df, _ws_val))
+
+        if not _rendered:
+            st.info("No weather events have stock recommendations right now.")
+        else:
+            for _i in range(0, len(_rendered), 2):
+                _cl, _cr = st.columns(2, gap="medium")
+                _ev_l, _ = _rendered[_i]
+                with _cl:
+                    show_recommendation_card(_ev_l, rank=_i + 1, all_df=filtered)
+                if _i + 1 < len(_rendered):
+                    _ev_r, _ = _rendered[_i + 1]
+                    with _cr:
+                        show_recommendation_card(_ev_r, rank=_i + 2, all_df=filtered)
+
+
 with tab_pulse:
     st.header("🌐 Global Pulse Trader")
     st.caption("One row per equity — weather-driven signals ranked by trade quality score.")
 
-    pulse_table = build_global_pulse_trader_table(filtered.copy())
-
+    # pulse_table is pre-computed above (shared with Recommendations tab)
     _pulse_cols = [
         "Date", "Stock Trade", "Trade",
         "Region", "Commodity", "Why It Matters", "Final Trade Score", "Conviction",
@@ -3184,19 +3502,22 @@ with tab_pulse:
     if pulse_table.empty:
         st.write("No recommendations right now.")
     else:
-        def _entry_gate(row) -> str:
-            trend = str(row.get("Trend", "")).lower()
-            if "worsening" in trend or "escalating" in trend:
-                return "🟢 Enter — Escalating"
-            if "new" in trend:
-                return "🟢 Enter — New Signal"
-            if "stable" in trend:
-                return "🟡 Monitor"
-            if "recovering" in trend or "de-escalating" in trend:
-                return "🔴 Avoid — Fading"
-            return "🟡 Monitor"
+        # ── New PRIME/ACTIONABLE highlight banner ─────────────────────────────
+        _new_prime = pulse_table[
+            pulse_table["Trend"].str.lower().isin(["new", "worsening"])
+            & pulse_table["Conviction"].isin(["PRIME", "ACTIONABLE"])
+            & (pulse_table["Trade"] != "No Trade")
+        ]
+        if not _new_prime.empty:
+            st.markdown(
+                f'<div style="background:#1e3a5f;border-radius:6px;padding:8px 14px;'
+                f'margin-bottom:12px;font-size:13px;color:#93c5fd;font-weight:600;">'
+                f'🆕 {len(_new_prime)} new PRIME/ACTIONABLE signal(s) — '
+                f'see Recommendations tab for full cards'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
-        pulse_table["Entry Gate"] = pulse_table.apply(_entry_gate, axis=1)
         disp_cols = ["Entry Gate"] + [c for c in _pulse_cols if c in pulse_table.columns]
         disp = pulse_table[disp_cols].copy()
         st.dataframe(disp, use_container_width=True, height=500)
