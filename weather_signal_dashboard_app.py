@@ -22,6 +22,29 @@ if not DATABASE_URL:
     st.stop()
 
 
+def _run_migrations() -> None:
+    """Ensure DB schema is up-to-date. Safe to call on every startup (idempotent)."""
+    migrations = [
+        # Added in generate_global_shocks.py — may not exist yet in production
+        "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS forecast_peak_at TIMESTAMP",
+        "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_article_url TEXT",
+        "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_pickup_at TIMESTAMP",
+        "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS media_score FLOAT",
+        "ALTER TABLE weather_global_shocks ADD COLUMN IF NOT EXISTS trend_direction TEXT",
+    ]
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                for sql in migrations:
+                    cur.execute(sql)
+            conn.commit()
+    except Exception:
+        pass  # Non-fatal — app can still run with partial schema
+
+
+_run_migrations()
+
+
 def read_sql(query: str) -> pd.DataFrame:
     with psycopg.connect(DATABASE_URL) as conn:
         cur = conn.cursor()
