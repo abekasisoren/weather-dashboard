@@ -6,7 +6,7 @@ services:
     name: weather-signal-updater
     runtime: python
     plan: starter
-    schedule: "0 */12 * * *"   # 00:00 and 12:00 UTC daily
+    schedule: "0 */12 * * *"   # 00:00 and 12:00 UTC daily  (2 builds/day)
     buildCommand: pip install -r requirements.txt
     startCommand: bash run_weather_pipeline.sh
     envVars:
@@ -18,7 +18,7 @@ services:
     name: media-monitor
     runtime: python
     plan: starter
-    schedule: "0 */6 * * *"   # 00:00, 06:00, 12:00, 18:00 UTC
+    schedule: "0 */6 * * *"   # 00:00, 06:00, 12:00, 18:00 UTC  (4 builds/day)
     buildCommand: pip install -r requirements.txt
     startCommand: python media_validator.py
     envVars:
