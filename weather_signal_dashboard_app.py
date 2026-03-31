@@ -2501,29 +2501,62 @@ def show_weather_event_card(
     streak_str = f"&nbsp;<span style='color:#555;font-size:9px;'>{streak}d</span>" if streak > 1 else ""
 
     # ── Dates ─────────────────────────────────────────────────────────────────
+    now_ts = pd.Timestamp.utcnow().tz_localize(None)
+
     first_detected = (
         event_rows["created_at"].min()
         if "created_at" in event_rows.columns else None
     )
+    last_updated = (
+        event_rows["created_at"].max()
+        if "created_at" in event_rows.columns else None
+    )
     spotted_str = _fmt_short_date(first_detected)
 
-    # forecast_peak_at = the specific time step when the anomaly is worst
-    # Only show if it's meaningfully in the future (> 2 days from now)
-    peak_at   = best_row.get("forecast_peak_at")
-    peak_str  = ""
+    # "↻ Updated Xd ago" — only shown when the event has been re-confirmed
+    # at least 24 h after its first detection
+    updated_str = ""
+    try:
+        if last_updated is not None and not pd.isna(last_updated):
+            last_ts  = pd.Timestamp(last_updated)
+            first_ts = pd.Timestamp(first_detected)
+            if (last_ts - first_ts).total_seconds() > 86400:
+                days_ago = int((now_ts - last_ts).total_seconds() / 86400)
+                if days_ago == 0:
+                    updated_str = "today"
+                elif days_ago == 1:
+                    updated_str = "yesterday"
+                else:
+                    updated_str = f"{days_ago}d ago"
+    except Exception:
+        pass
+
+    # forecast_peak_at — the specific GRIB time-step when the anomaly peaks
+    # Fall back to forecast_end if peak_at is NULL or already in the past
+    # Only display if meaningfully in the future (> 1 day from now)
+    peak_at  = best_row.get("forecast_peak_at")
+    peak_str = ""
     try:
         if peak_at is not None and not pd.isna(peak_at):
             peak_ts = pd.Timestamp(peak_at)
-            if peak_ts > pd.Timestamp.utcnow().tz_localize(None) + pd.Timedelta(days=2):
+            if peak_ts > now_ts + pd.Timedelta(days=1):
                 peak_str = _fmt_short_date(peak_at)
+        if not peak_str:
+            fe = best_row.get("forecast_end")
+            if fe is not None and not pd.isna(fe):
+                fe_ts = pd.Timestamp(fe)
+                if fe_ts > now_ts + pd.Timedelta(days=1):
+                    peak_str = _fmt_short_date(fe)
     except Exception:
         pass
 
     date_parts = []
     if spotted_str:
         date_parts.append(f'🔍 Spotted&nbsp;<b>{spotted_str}</b>')
+    if updated_str:
+        date_parts.append(f'↻ Updated&nbsp;<b>{updated_str}</b>')
     if peak_str:
-        date_parts.append(f'⚡ Peaks&nbsp;<b>{peak_str}</b>')
+        date_parts.append(f'⚡ Forecast&nbsp;<b>{peak_str}</b>')
     date_row_html = (
         f'<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:11px;'
         f'color:#666;margin-bottom:10px;">'
@@ -2713,6 +2746,22 @@ df = (
     .drop_duplicates(subset=["region", "commodity", "anomaly_type"], keep="first")
     .reset_index(drop=True)
 )
+
+# ─── Staleness filter — hide events the pipeline hasn't refreshed in 7 days ──
+# If ECMWF no longer shows the anomaly, generate_global_shocks.py stops writing
+# new rows for that (region, anomaly_type).  After 7 days without a new row the
+# event is considered over and we drop it from the dashboard.
+if "created_at" in df.columns and not df.empty:
+    _now_filter = pd.Timestamp.utcnow().tz_localize(None)
+    _cutoff     = _now_filter - pd.Timedelta(days=7)
+    # Per (region, anomaly_type) group find the most-recent pipeline hit
+    _last_seen  = df.groupby(["region", "anomaly_type"])["created_at"].transform("max")
+    try:
+        _last_seen = pd.to_datetime(_last_seen).dt.tz_localize(None)
+    except Exception:
+        pass
+    _stale_mask = _last_seen < _cutoff
+    df = df[~_stale_mask].reset_index(drop=True)
 
 # ─── Auto media validation (runs once per session, max every 6 hours) ────────
 
