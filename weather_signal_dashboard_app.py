@@ -2670,46 +2670,51 @@ def show_weather_event_card(
 
 # ─── Data load ────────────────────────────────────────────────────────────────
 
-df = read_sql(
-    """
-    SELECT
-        timestamp,
-        region,
-        commodity,
-        anomaly_type,
-        anomaly_value,
-        persistence_score,
-        severity_score,
-        market_score,
-        signal_level,
-        signal_bucket,
-        trade_bias,
-        recommendation,
-        affected_market,
-        best_vehicle,
-        proxy_equities,
-        secondary_exposures,
-        affected_assets_json,
-        what_changed,
-        why_it_matters,
-        what_to_watch_next,
-        source_file,
-        forecast_start,
-        forecast_end,
-        details,
-        created_at,
-        COALESCE(trend_direction, 'new') AS trend_direction,
-        media_validated,
-        media_source,
-        media_headline,
-        media_pickup_at,
-        media_article_url,
-        forecast_peak_at
-    FROM weather_global_shocks
-    ORDER BY created_at DESC, signal_level DESC, region ASC, commodity ASC
-
-    """
-)
+try:
+    df = read_sql(
+        """
+        SELECT
+            timestamp,
+            region,
+            commodity,
+            anomaly_type,
+            anomaly_value,
+            persistence_score,
+            severity_score,
+            market_score,
+            signal_level,
+            signal_bucket,
+            trade_bias,
+            recommendation,
+            affected_market,
+            best_vehicle,
+            proxy_equities,
+            secondary_exposures,
+            affected_assets_json,
+            what_changed,
+            why_it_matters,
+            what_to_watch_next,
+            source_file,
+            forecast_start,
+            forecast_end,
+            details,
+            created_at,
+            COALESCE(trend_direction, 'new') AS trend_direction,
+            media_validated,
+            media_source,
+            media_headline,
+            media_pickup_at,
+            media_article_url,
+            forecast_peak_at
+        FROM weather_global_shocks
+        ORDER BY created_at DESC, signal_level DESC, region ASC, commodity ASC
+        """
+    )
+except Exception as _db_err:
+    st.title("Global Weather Signal Dashboard")
+    st.error(f"⚠️ Database error on startup: {_db_err}")
+    st.info("The database schema may be updating. Please refresh in a moment.")
+    st.stop()
 
 if df.empty:
     st.title("Global Weather Signal Dashboard")
