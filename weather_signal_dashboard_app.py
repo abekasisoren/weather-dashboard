@@ -2702,10 +2702,33 @@ def show_weather_event_card(
     severity          = float(best_row.get("severity_score") or 0)
     sev_pct           = min(int(severity * 10), 100)
     # Media fields (used in expander / Block 3)
-    media_article_url  = best_row.get("media_article_url", "") or ""
-    media_headline_val = best_row.get("media_headline", "") or ""
-    media_source_val   = best_row.get("media_source", "") or ""
+    # DB NULL columns come back as float NaN via pandas — must sanitise before
+    # any string operation (e.g. headline[:100]) or they raise TypeError.
+    def _db_str(v) -> str:
+        """Convert a DB column value to str, returning '' for None/NaN."""
+        if v is None:
+            return ""
+        if isinstance(v, float) and v != v:   # NaN != NaN is the NaN test
+            return ""
+        s = str(v).strip()
+        return "" if s in ("nan", "None", "NaT", "<NA>") else s
+
+    media_article_url  = _db_str(best_row.get("media_article_url"))
+    media_headline_val = _db_str(best_row.get("media_headline"))
+    media_source_val   = _db_str(best_row.get("media_source"))
     media_pickup_ago   = ""
+    # Compute "X days after spotting" for the pickup timing display
+    try:
+        _mpu = best_row.get("media_pickup_at")
+        _ca  = event_rows["created_at"].min() if "created_at" in event_rows.columns else None
+        if _mpu is not None and not (isinstance(_mpu, float) and _mpu != _mpu) \
+                and _ca  is not None and not (isinstance(_ca,  float) and _ca  != _ca):
+            _d = (pd.Timestamp(_mpu).tz_localize(None)
+                  - pd.Timestamp(_ca).tz_localize(None)).days
+            if _d >= 0:
+                media_pickup_ago = f"{_d}d after first signal"
+    except Exception:
+        pass
     # Stock list stub — populated in Block 2 (not rendered yet)
     stock_list: list = []
 
@@ -3084,13 +3107,13 @@ selected_trades = st.sidebar.multiselect("Trade", trade_options, default=trade_o
 trend_options = ["worsening", "new", "stable", "recovering"]
 selected_trends = st.sidebar.multiselect("Trend Direction", trend_options, default=["worsening", "new", "stable"])
 
-# Media-confirmed events are in the EXIT window — visible by default, user can hide
+# Media-confirmed events are in the EXIT window — hide by default
 hide_confirmed = st.sidebar.checkbox(
     "🚪 Hide media-confirmed events",
-    value=False,
+    value=True,
     help="When checked, events already confirmed by media (EXIT window open) are removed "
-         "from the Radar and Pulse Trader. The alpha window is closing, but the weather "
-         "event itself is still real and may affect related commodities/regions.",
+         "from the Radar and Pulse Trader. The alpha window is closed once media picks it up. "
+         "Confirmed events still appear in the Alpha Window Log at the bottom of Radar.",
 )
 
 region_options = sorted(df["region"].dropna().astype(str).unique().tolist())
@@ -3136,22 +3159,19 @@ _REGION_FAMILY: dict[str, frozenset] = {
 
 _n_confirmed_hidden = 0
 if hide_confirmed and "media_validated" in df.columns:
-    # Collect the specific (region, anomaly_type) pairs that have media confirmation.
-    # Only hide the confirmed pair — not the entire region or its family.
-    # This prevents a single storm_wind confirmation from hiding all drought/frost
-    # signals in the same region.
-    _confirmed_pairs: set[tuple[str, str]] = set(
-        df.loc[df["media_validated"] == True, ["region", "anomaly_type"]]
-        .dropna()
-        .apply(lambda r: (str(r["region"]), str(r["anomaly_type"])), axis=1)
-        .tolist()
+    # Collect ALL confirmed regions from full df (not just filtered)
+    _confirmed_raw = set(
+        df.loc[df["media_validated"] == True, "region"].dropna().astype(str).unique()
     )
-    _confirmed_mask = filtered.apply(
-        lambda r: (str(r.get("region", "")), str(r.get("anomaly_type", "")))
-                  in _confirmed_pairs,
-        axis=1,
-    )
-    _n_confirmed_hidden = int(_confirmed_mask.sum())
+    # Expand each confirmed region to its full family
+    _confirmed_regions: set[str] = set()
+    for _r in _confirmed_raw:
+        _confirmed_regions.add(_r)
+        _confirmed_regions.update(_REGION_FAMILY.get(_r, frozenset()))
+
+    # Hide ALL anomaly types for confirmed region families
+    _confirmed_mask = filtered["region"].astype(str).isin(_confirmed_regions)
+    _n_confirmed_hidden = int(filtered[_confirmed_mask]["region"].nunique())
     filtered = filtered[~_confirmed_mask].copy()
 
 filtered_ranked = build_ranked_trade_table(filtered)
@@ -3421,6 +3441,89 @@ with tab_radar:
             ]
             available_cols = [c for c in display_cols if c in filtered_ranked.columns]
             st.dataframe(filtered_ranked[available_cols], use_container_width=True, height=380)
+
+    # ── Alpha Window Log — calibrate how long signals last before media picks them up ──
+    st.divider()
+    st.subheader("📰 Alpha Window Log")
+    st.caption(
+        "Events already confirmed by financial/weather media — hidden from the active Radar. "
+        "Use the delta column to calibrate **how much lead time you typically have** "
+        "between first ECMWF detection and media coverage."
+    )
+    if "media_validated" in df.columns and df["media_validated"].eq(True).any():
+        # Use raw df (bypasses hide_confirmed filter) so confirmed events always appear here
+        _aw_df = df[df["media_validated"] == True].copy()
+
+        # Per (region, anomaly_type): min created_at = first spotted, max = last confirmed by pipeline
+        _aw_grp = (
+            _aw_df.groupby(["region", "anomaly_type"], as_index=False)
+            .agg(
+                first_spotted=("created_at", "min"),
+                last_seen=("created_at", "max"),
+                signal_level=("signal_level", "max"),
+                commodity=("commodity", lambda x: ", ".join(sorted(x.dropna().unique()))),
+                media_pickup_at=("media_pickup_at", "max"),
+                media_headline=("media_headline", "first"),
+                media_source=("media_source", "first"),
+                trade_bias=("trade_bias", "first"),
+            )
+            .sort_values("media_pickup_at", ascending=False)
+        )
+
+        # Compute delta: first_spotted → media_pickup_at
+        def _delta_days(row):
+            try:
+                spotted = pd.Timestamp(row["first_spotted"]).tz_localize(None)
+                pickup  = pd.Timestamp(row["media_pickup_at"]).tz_localize(None)
+                d = (pickup - spotted).days
+                return d if d >= 0 else None
+            except Exception:
+                return None
+
+        _aw_grp["Alpha Window (days)"] = _aw_grp.apply(_delta_days, axis=1)
+
+        # Format display columns
+        def _fmt_ts(ts):
+            try:
+                return pd.Timestamp(ts).strftime("%-d %b %Y")
+            except Exception:
+                return ""
+
+        _aw_grp["First Spotted"]  = _aw_grp["first_spotted"].apply(_fmt_ts)
+        _aw_grp["Media Pickup"]   = _aw_grp["media_pickup_at"].apply(_fmt_ts)
+        _aw_grp["Headline"]       = _aw_grp["media_headline"].apply(
+            lambda v: str(v)[:80] + "…" if v and str(v) not in ("nan","None","") and len(str(v)) > 80
+            else (str(v) if v and str(v) not in ("nan","None","") else "")
+        )
+
+        _aw_display = _aw_grp[[
+            "region", "anomaly_type", "commodity",
+            "signal_level", "trade_bias",
+            "First Spotted", "Media Pickup", "Alpha Window (days)",
+            "Headline", "media_source",
+        ]].rename(columns={
+            "region": "Region",
+            "anomaly_type": "Anomaly",
+            "commodity": "Commodities",
+            "signal_level": "Sig",
+            "trade_bias": "Bias",
+            "media_source": "Source",
+        })
+
+        # Summary stat
+        _valid_deltas = _aw_grp["Alpha Window (days)"].dropna()
+        if not _valid_deltas.empty:
+            _med = int(_valid_deltas.median())
+            _min = int(_valid_deltas.min())
+            _max = int(_valid_deltas.max())
+            aw1, aw2, aw3 = st.columns(3)
+            aw1.metric("Median Alpha Window", f"{_med}d")
+            aw2.metric("Shortest", f"{_min}d")
+            aw3.metric("Longest", f"{_max}d")
+
+        st.dataframe(_aw_display, use_container_width=True, height=320)
+    else:
+        st.info("No media-confirmed events yet. Once signals are confirmed by media they'll appear here with timing data.")
 
 
 with tab_recs:
