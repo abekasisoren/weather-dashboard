@@ -3084,12 +3084,13 @@ selected_trades = st.sidebar.multiselect("Trade", trade_options, default=trade_o
 trend_options = ["worsening", "new", "stable", "recovering"]
 selected_trends = st.sidebar.multiselect("Trend Direction", trend_options, default=["worsening", "new", "stable"])
 
-# Media-confirmed events are in the EXIT window — hide by default
+# Media-confirmed events are in the EXIT window — visible by default, user can hide
 hide_confirmed = st.sidebar.checkbox(
     "🚪 Hide media-confirmed events",
-    value=True,
+    value=False,
     help="When checked, events already confirmed by media (EXIT window open) are removed "
-         "from the Radar and Pulse Trader. The alpha window is closed once media picks it up.",
+         "from the Radar and Pulse Trader. The alpha window is closing, but the weather "
+         "event itself is still real and may affect related commodities/regions.",
 )
 
 region_options = sorted(df["region"].dropna().astype(str).unique().tolist())
@@ -3135,19 +3136,22 @@ _REGION_FAMILY: dict[str, frozenset] = {
 
 _n_confirmed_hidden = 0
 if hide_confirmed and "media_validated" in df.columns:
-    # Collect ALL confirmed regions from full df (not just filtered)
-    _confirmed_raw = set(
-        df.loc[df["media_validated"] == True, "region"].dropna().astype(str).unique()
+    # Collect the specific (region, anomaly_type) pairs that have media confirmation.
+    # Only hide the confirmed pair — not the entire region or its family.
+    # This prevents a single storm_wind confirmation from hiding all drought/frost
+    # signals in the same region.
+    _confirmed_pairs: set[tuple[str, str]] = set(
+        df.loc[df["media_validated"] == True, ["region", "anomaly_type"]]
+        .dropna()
+        .apply(lambda r: (str(r["region"]), str(r["anomaly_type"])), axis=1)
+        .tolist()
     )
-    # Expand each confirmed region to its full family
-    _confirmed_regions: set[str] = set()
-    for _r in _confirmed_raw:
-        _confirmed_regions.add(_r)
-        _confirmed_regions.update(_REGION_FAMILY.get(_r, frozenset()))
-
-    # Hide ALL anomaly types for confirmed region families
-    _confirmed_mask = filtered["region"].astype(str).isin(_confirmed_regions)
-    _n_confirmed_hidden = int(filtered[_confirmed_mask]["region"].nunique())
+    _confirmed_mask = filtered.apply(
+        lambda r: (str(r.get("region", "")), str(r.get("anomaly_type", "")))
+                  in _confirmed_pairs,
+        axis=1,
+    )
+    _n_confirmed_hidden = int(_confirmed_mask.sum())
     filtered = filtered[~_confirmed_mask].copy()
 
 filtered_ranked = build_ranked_trade_table(filtered)
