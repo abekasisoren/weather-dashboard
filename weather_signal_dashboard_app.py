@@ -2345,15 +2345,24 @@ def build_detailed_reasoning(
     st.markdown("#### ⚡ Information Edge")
     st.markdown(edge_text)
     # Article link — shown when media has confirmed this event
-    if media_article_url:
-        label = media_headline[:100] if media_headline else media_source or "Source"
-        timing = f" · {media_pickup_ago}" if media_pickup_ago else ""
-        st.markdown(
-            f"📰 **Media source{timing}:** [{label}]({media_article_url})",
-        )
-    elif media_source and not media_article_url:
-        timing = f" · {media_pickup_ago}" if media_pickup_ago else ""
-        st.caption(f"📰 Confirmed by {media_source}{timing} (no direct link stored)")
+    # Guard: DB NULL columns come back as float NaN via pandas — must sanitise
+    # before any string operation or they raise TypeError: 'float' not subscriptable
+    def _s(v) -> str:
+        if v is None: return ""
+        if isinstance(v, float) and v != v: return ""   # NaN != NaN
+        s = str(v).strip()
+        return "" if s in ("nan", "None", "NaT", "<NA>") else s
+
+    _url     = _s(media_article_url)
+    _hl      = _s(media_headline)
+    _src     = _s(media_source)
+    _timing  = f" · {media_pickup_ago}" if media_pickup_ago else ""
+
+    if _url:
+        label = _hl[:100] if _hl else _src or "Source"
+        st.markdown(f"📰 **Media source{_timing}:** [{label}]({_url})")
+    elif _src:
+        st.caption(f"📰 Confirmed by {_src}{_timing} (no direct link stored)")
 
     # 8. Trade thesis
     if long_thesis or short_thesis:
