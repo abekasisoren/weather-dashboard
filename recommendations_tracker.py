@@ -149,6 +149,42 @@ def fetch_prices(symbols: list[str]) -> dict[str, Optional[float]]:
 
 # ─── Historical price fetching (Yahoo Finance, for T+3 / T+5 snapshots) ───────
 
+
+def next_trading_day(d: date) -> date:
+    """Return the next calendar day that is a weekday (Mon–Fri)."""
+    d = d + timedelta(days=1)
+    while d.weekday() >= 5:  # 5=Sat, 6=Sun
+        d = d + timedelta(days=1)
+    return d
+
+
+def get_historical_open(symbol: str, target_date: date) -> Optional[float]:
+    """
+    Fetch the open price for `symbol` on `target_date` (or the nearest trading day
+    within +7 days) using Finnhub /stock/candle endpoint.
+    Requires FINNHUB_API_KEY env var.
+    """
+    api_key = os.environ.get("FINNHUB_API_KEY", "")
+    if not api_key:
+        return None
+    ts_from = int(datetime.combine(target_date, datetime.min.time()).timestamp())
+    ts_to   = int(datetime.combine(target_date + timedelta(days=7), datetime.min.time()).timestamp())
+    url = (
+        f"https://finnhub.io/api/v1/stock/candle"
+        f"?symbol={symbol}&resolution=D"
+        f"&from={ts_from}&to={ts_to}&token={api_key}"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        if data.get("s") == "ok" and data.get("o"):
+            return round(float(data["o"][0]), 4)
+    except Exception:
+        pass
+    return None
+
+
 def _business_days_after(start, n: int) -> date:
     """Return the date that is n business days after `start` (datetime or date)."""
     d = start.date() if hasattr(start, "date") else start

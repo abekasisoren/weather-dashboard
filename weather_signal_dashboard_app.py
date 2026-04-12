@@ -3866,6 +3866,7 @@ with tab_aftermath:
         get_performance_summary, get_fetch_errors,
         STOP_LOSS_PCT, TAKE_PROFIT_PCT,
         close_positions_stop_loss,
+        get_historical_open, next_trading_day,
     )
 
     # Ensure DB table exists
@@ -3903,6 +3904,212 @@ with tab_aftermath:
                         st.info("No open positions hit the thresholds.")
                 except Exception as _e:
                     st.error(f"Error scanning: {_e}")
+
+    # ── Media Exit Tracker ────────────────────────────────────────────────────
+    st.subheader("🎯 Media Exit Tracker")
+    st.caption(
+        "Entry = stock open on first ECMWF detection · "
+        "Exit = stock open 1 trading day after media pickup · "
+        "P&L = (exit − entry) / entry"
+    )
+
+    _met_df = df[df["media_validated"] == True].copy() if "media_validated" in df.columns else pd.DataFrame()
+
+    if _met_df.empty:
+        st.info("No media-confirmed events yet. P&L will appear here once the media monitor confirms a weather signal.")
+    else:
+        _finnhub_key = os.environ.get("FINNHUB_API_KEY", "")
+        if not _finnhub_key:
+            st.warning("⚠️ FINNHUB_API_KEY not set — prices will show as N/A. Add the key as a Render env var.")
+
+        # Group by (region, anomaly_type) — one row per weather event
+        _met_groups = (
+            _met_df.groupby(["region", "anomaly_type"], sort=False)
+            .apply(lambda g: g)
+            .reset_index(drop=True)
+        )
+        _met_keys = (
+            _met_df.groupby(["region", "anomaly_type"], sort=False)
+            .apply(lambda g: g.sort_values("signal_level", ascending=False).iloc[0])
+            .reset_index(drop=True)
+        )
+
+        _exit_rows: list[dict] = []
+
+        with st.spinner("Fetching historical prices from Finnhub…"):
+            for _, best_row in _met_keys.iterrows():
+                _region   = str(best_row.get("region", "—"))
+                _anomaly  = str(best_row.get("anomaly_type", "—")).replace("_", " ").title()
+
+                # Dates
+                _event_rows = _met_df[
+                    (_met_df["region"] == _region)
+                    & (_met_df["anomaly_type"] == best_row.get("anomaly_type", ""))
+                ]
+                _first_spotted_raw = _event_rows["created_at"].min() if "created_at" in _event_rows.columns else None
+                _pickup_raw        = best_row.get("media_pickup_at")
+
+                _first_spotted: "pd.Timestamp | None" = None
+                _exit_date: "date | None" = None
+                _pickup_date: "date | None" = None
+                try:
+                    if _first_spotted_raw is not None and not (isinstance(_first_spotted_raw, float) and _first_spotted_raw != _first_spotted_raw):
+                        _first_spotted = pd.Timestamp(_first_spotted_raw)
+                    if _pickup_raw is not None and not (isinstance(_pickup_raw, float) and _pickup_raw != _pickup_raw):
+                        _pickup_ts   = pd.Timestamp(_pickup_raw)
+                        _pickup_date = _pickup_ts.date()
+                        _exit_date   = next_trading_day(_pickup_date)
+                except Exception:
+                    pass
+
+                # Stocks
+                _vehicle         = get_vehicle(best_row)
+                _direction, _syms = get_stock_trade_symbols(best_row)
+                _all_syms: list[str] = []
+                if _vehicle and _vehicle not in _all_syms:
+                    _all_syms.append(_vehicle)
+                for _s in (_syms or []):
+                    if _s and _s not in _all_syms:
+                        _all_syms.append(_s)
+
+                _trade_bias = str(best_row.get("trade_bias", "")).lower()
+                _is_long = "long" in _trade_bias or _direction == "Long"
+                _is_short = "short" in _trade_bias or _direction == "Short"
+
+                # Media metadata
+                def _ms(v) -> str:
+                    if v is None: return ""
+                    if isinstance(v, float) and v != v: return ""
+                    s = str(v).strip()
+                    return "" if s in ("nan", "None", "NaT", "<NA>") else s
+
+                _headline = _ms(best_row.get("media_headline"))
+                _source   = _ms(best_row.get("media_source"))
+                _url      = _ms(best_row.get("media_article_url"))
+
+                for _sym in _all_syms[:5]:
+                    # Fetch entry price (open on first_spotted date)
+                    _entry_price: "float | None" = None
+                    _exit_price:  "float | None" = None
+                    if _finnhub_key and _first_spotted is not None:
+                        try:
+                            _entry_price = get_historical_open(_sym, _first_spotted.date())
+                        except Exception:
+                            pass
+                    if _finnhub_key and _exit_date is not None:
+                        try:
+                            _exit_price = get_historical_open(_sym, _exit_date)
+                        except Exception:
+                            pass
+
+                    # P&L
+                    _pnl_pct: "float | None" = None
+                    if _entry_price and _exit_price and _entry_price > 0:
+                        raw = (_exit_price - _entry_price) / _entry_price * 100
+                        _pnl_pct = raw if _is_long else -raw
+
+                    _exit_rows.append({
+                        "Region":         _region,
+                        "Anomaly":        _anomaly,
+                        "Symbol":         _sym,
+                        "Direction":      "Long" if _is_long else ("Short" if _is_short else "Watch"),
+                        "Entry Date":     _first_spotted.strftime("%d %b %Y") if _first_spotted else "—",
+                        "Entry Price":    f"${_entry_price:.2f}" if _entry_price else "—",
+                        "Media Pickup":   _pickup_date.strftime("%d %b %Y") if _pickup_date else "—",
+                        "Exit Date":      _exit_date.strftime("%d %b %Y") if _exit_date else "—",
+                        "Exit Price":     f"${_exit_price:.2f}" if _exit_price else "—",
+                        "P&L %":          round(_pnl_pct, 2) if _pnl_pct is not None else None,
+                        "Headline":       (_headline[:80] + "…") if len(_headline) > 80 else _headline,
+                        "Source":         _source,
+                        "Link":           _url,
+                    })
+
+        if not _exit_rows:
+            st.info("No tradeable stocks found for media-confirmed events.")
+        else:
+            _exit_table = pd.DataFrame(_exit_rows)
+
+            # KPI row
+            _has_pnl = _exit_table["P&L %"].notna()
+            _winners = (_exit_table.loc[_has_pnl, "P&L %"] > 0).sum()
+            _losers  = (_exit_table.loc[_has_pnl, "P&L %"] <= 0).sum()
+            _avg_pnl = _exit_table.loc[_has_pnl, "P&L %"].mean() if _has_pnl.any() else None
+            _kc1, _kc2, _kc3, _kc4 = st.columns(4)
+            _kc1.metric("Positions",       len(_exit_table))
+            _kc2.metric("Winners",         _winners)
+            _kc3.metric("Losers",          _losers)
+            _kc4.metric("Avg P&L %",       f"{_avg_pnl:+.1f}%" if _avg_pnl is not None else "—")
+            st.divider()
+
+            # Render cards — one per (region, anomaly) group
+            for (_grp_region, _grp_anomaly), _grp in _exit_table.groupby(["Region", "Anomaly"]):
+                _grp_bias = _grp["Direction"].iloc[0]
+                _border   = "#2ECC71" if _grp_bias == "Long" else ("#E74C3C" if _grp_bias == "Short" else "#F39C12")
+                _pickup_label = _grp["Media Pickup"].iloc[0]
+                _hl_text  = _grp["Headline"].iloc[0]
+                _src_text = _grp["Source"].iloc[0]
+                _lnk_text = _grp["Link"].iloc[0]
+
+                _media_html = ""
+                if _lnk_text:
+                    _lnk_label = _hl_text if _hl_text else (_src_text or "Source")
+                    _media_html = f'<a href="{_lnk_text}" target="_blank" style="color:#93c5fd;font-size:11px;">📰 {_lnk_label}</a>'
+                elif _hl_text:
+                    _media_html = f'<span style="color:#93c5fd;font-size:11px;">📰 {_hl_text}</span>'
+                elif _src_text:
+                    _media_html = f'<span style="color:#93c5fd;font-size:11px;">📰 {_src_text}</span>'
+
+                # Stock rows
+                _stock_rows_html = ""
+                for _, _sr in _grp.iterrows():
+                    _pnl_val = _sr["P&L %"]
+                    if _pnl_val is None or (isinstance(_pnl_val, float) and _pnl_val != _pnl_val):
+                        _pnl_disp = "—"
+                        _pnl_col  = "#888"
+                    elif _pnl_val > 0:
+                        _pnl_disp = f"+{_pnl_val:.1f}%"
+                        _pnl_col  = "#2ECC71"
+                    else:
+                        _pnl_disp = f"{_pnl_val:.1f}%"
+                        _pnl_col  = "#E74C3C"
+                    _stock_rows_html += (
+                        f'<tr>'
+                        f'<td style="padding:4px 8px;font-weight:700;color:#e2e8f0;">{_sr["Symbol"]}</td>'
+                        f'<td style="padding:4px 8px;color:#94a3b8;">{_sr["Entry Date"]}</td>'
+                        f'<td style="padding:4px 8px;color:#94a3b8;">{_sr["Entry Price"]}</td>'
+                        f'<td style="padding:4px 8px;color:#94a3b8;">{_sr["Media Pickup"]}</td>'
+                        f'<td style="padding:4px 8px;color:#94a3b8;">{_sr["Exit Date"]}</td>'
+                        f'<td style="padding:4px 8px;color:#94a3b8;">{_sr["Exit Price"]}</td>'
+                        f'<td style="padding:4px 8px;font-weight:700;color:{_pnl_col};">{_pnl_disp}</td>'
+                        f'</tr>'
+                    )
+
+                st.markdown(
+                    f'<div style="background:#16181D;border-left:4px solid {_border};'
+                    f'border-radius:8px;padding:14px 16px;margin-bottom:14px;">'
+                    f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">'
+                    f'<span style="font-size:15px;font-weight:700;color:#e2e8f0;">'
+                    f'🌍 {_grp_region} · {_grp_anomaly}</span>'
+                    f'<span style="font-size:11px;color:#94a3b8;">📡 Media pickup: {_pickup_label}</span>'
+                    f'</div>'
+                    f'{("<div style=\'margin-bottom:8px;\'>" + _media_html + "</div>") if _media_html else ""}'
+                    f'<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+                    f'<thead><tr style="color:#64748b;border-bottom:1px solid #2d2d2d;">'
+                    f'<th style="padding:4px 8px;text-align:left;">Symbol</th>'
+                    f'<th style="padding:4px 8px;text-align:left;">Entry Date</th>'
+                    f'<th style="padding:4px 8px;text-align:left;">Entry $</th>'
+                    f'<th style="padding:4px 8px;text-align:left;">Media Pickup</th>'
+                    f'<th style="padding:4px 8px;text-align:left;">Exit Date</th>'
+                    f'<th style="padding:4px 8px;text-align:left;">Exit $</th>'
+                    f'<th style="padding:4px 8px;text-align:left;">P&amp;L</th>'
+                    f'</tr></thead>'
+                    f'<tbody>{_stock_rows_html}</tbody>'
+                    f'</table>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+    st.divider()
 
     # ── Log today's recommendations ───────────────────────────────────────────
     st.subheader("Log Today's Recommendations")
