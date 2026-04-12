@@ -2493,10 +2493,12 @@ def show_recommendation_card(
     event_rows: "pd.DataFrame",
     rank: int,
     all_df: "pd.DataFrame",
+    aftermath_df: "pd.DataFrame | None" = None,
 ) -> None:
     """
     Recommendation card — one per weather event, all affected equities inside.
     Bridge between Radar (weather) and Pulse Trader (stocks).
+    If aftermath_df is provided, overlays actual P&L vs the system score.
     """
     best_row    = event_rows.sort_values("signal_level", ascending=False).iloc[0]
     anomaly_raw = normalize_text(best_row.get("anomaly_type", ""), "—")
@@ -2509,6 +2511,24 @@ def show_recommendation_card(
     score_pct   = int(min(100, max(0, weather_str * 10)))
     accent      = ANOMALY_ACCENT.get(anomaly_key, "#F39C12")
     why         = get_why_it_matters(best_row)
+
+    # ── Aftermath performance lookup (actual P&L vs predicted score) ──────────
+    perf_by_sym: dict = {}   # sym (upper) → best_pnl float
+    perf_avg = None
+    perf_count = 0
+    if aftermath_df is not None and not aftermath_df.empty:
+        _am = aftermath_df[
+            (aftermath_df["Region"].str.strip().str.lower() == region.lower())
+            & (aftermath_df["Anomaly"].str.strip().str.lower() == anomaly.lower())
+        ]
+        for _, _pr in _am.iterrows():
+            _sym = str(_pr.get("Stock", "")).strip().upper()
+            _pnl = _pr.get("_pnl_raw")
+            if _sym and _pnl is not None and not (isinstance(_pnl, float) and pd.isna(_pnl)):
+                perf_by_sym[_sym] = float(_pnl)
+        if perf_by_sym:
+            perf_count = len(perf_by_sym)
+            perf_avg   = sum(perf_by_sym.values()) / perf_count
 
     # ── Stocks ────────────────────────────────────────────────────────────────
     vehicle          = get_vehicle(best_row)
@@ -2627,6 +2647,18 @@ def show_recommendation_card(
             if s != vehicle:
                 all_long_syms.append((s, False))
 
+    def _pnl_badge(sym: str) -> str:
+        """Return a small P&L badge HTML if we have actual performance data for this symbol."""
+        pnl = perf_by_sym.get(sym.upper())
+        if pnl is None:
+            return ""
+        col = "#2ECC71" if pnl >= 0 else "#E74C3C"
+        return (
+            f'<span style="font-size:9px;color:{col};font-weight:700;'
+            f'margin-left:-1px;margin-right:3px;vertical-align:middle;">'
+            f'{pnl:+.1f}%</span>'
+        )
+
     if all_long_syms or all_short_syms:
         chip_rows_html = (
             '<div style="border-top:1px solid #2a2a2a;margin-top:10px;padding-top:8px;">'
@@ -2639,15 +2671,38 @@ def show_recommendation_card(
             chip_rows_html += (
                 f'<div style="margin-bottom:4px;font-size:10px;color:{label_color};'
                 f'font-weight:700;">{chip_label}&nbsp;'
-                + "".join(_stock_chip(s, label_color, primary) for s, primary in all_long_syms)
+                + "".join(
+                    _stock_chip(s, label_color, primary) + _pnl_badge(s)
+                    for s, primary in all_long_syms
+                )
                 + "</div>"
             )
         if all_short_syms:
             chip_rows_html += (
                 '<div style="margin-bottom:4px;font-size:10px;color:#E74C3C;font-weight:700;">'
                 "🔴 SELL:&nbsp;"
-                + "".join(_stock_chip(s, "#E74C3C", primary) for s, primary in all_short_syms)
+                + "".join(
+                    _stock_chip(s, "#E74C3C", primary) + _pnl_badge(s)
+                    for s, primary in all_short_syms
+                )
                 + "</div>"
+            )
+        # ── Performance summary row (actual vs predicted) ──────────────────────
+        if perf_avg is not None:
+            _avg_col    = "#2ECC71" if perf_avg >= 0 else "#E74C3C"
+            _wins       = sum(1 for v in perf_by_sym.values() if v > 0)
+            _win_pct    = int(100 * _wins / perf_count) if perf_count else 0
+            _outcome_ic = "✅" if perf_avg >= 0 else "❌"
+            chip_rows_html += (
+                f'<div style="margin-top:8px;padding-top:6px;border-top:1px solid #222;'
+                f'font-size:10px;color:#555;display:flex;gap:16px;flex-wrap:wrap;'
+                f'align-items:center;">'
+                f'<span>📊 {perf_count} logged</span>'
+                f'<span>Avg&nbsp;<b style="color:{_avg_col};">{perf_avg:+.1f}%</b></span>'
+                f'<span>Win rate&nbsp;<b style="color:#aaa;">{_win_pct}%</b></span>'
+                f'<span style="color:#444;">vs score&nbsp;'
+                f'<b style="color:#aaa;">{weather_str:.1f}/10</b>&nbsp;{_outcome_ic}</span>'
+                f'</div>'
             )
         chip_rows_html += "</div>"
 
@@ -3573,14 +3628,23 @@ with tab_recs:
     if filtered.empty:
         st.info("No recommendations match the current filters.")
     else:
+        # ── Load aftermath performance data (for P&L overlay on each card) ────
+        _recs_aftermath = pd.DataFrame()
+        try:
+            _recs_aftermath = get_aftermath_table()
+        except Exception:
+            pass
+
         # ── KPI bar ───────────────────────────────────────────────────────────
         _tb_total = filtered["anomaly_type"].nunique()
         _tb_long  = int((filtered["trade_bias"].str.lower() == "long").sum())
         _tb_short = int((filtered["trade_bias"].str.lower() == "short").sum())
-        rc1, rc2, rc3 = st.columns(3)
-        rc1.metric("Weather Events", _tb_total)
+        _tb_tracked = len(_recs_aftermath) if not _recs_aftermath.empty else 0
+        rc1, rc2, rc3, rc4 = st.columns(4)
+        rc1.metric("Weather Events",  _tb_total)
         rc2.metric("🟢 Long setups",  _tb_long)
         rc3.metric("🔴 Short setups", _tb_short)
+        rc4.metric("📊 Positions tracked", _tb_tracked)
         st.divider()
 
         # ── Build ranked group list (same groupby as Radar tab) ───────────────
@@ -3626,11 +3690,17 @@ with tab_recs:
                 _cl, _cr = st.columns(2, gap="medium")
                 _ev_l, _ = _rendered[_i]
                 with _cl:
-                    show_recommendation_card(_ev_l, rank=_i + 1, all_df=filtered)
+                    show_recommendation_card(
+                        _ev_l, rank=_i + 1, all_df=filtered,
+                        aftermath_df=_recs_aftermath if not _recs_aftermath.empty else None,
+                    )
                 if _i + 1 < len(_rendered):
                     _ev_r, _ = _rendered[_i + 1]
                     with _cr:
-                        show_recommendation_card(_ev_r, rank=_i + 2, all_df=filtered)
+                        show_recommendation_card(
+                            _ev_r, rank=_i + 2, all_df=filtered,
+                            aftermath_df=_recs_aftermath if not _recs_aftermath.empty else None,
+                        )
 
 
 with tab_pulse:
