@@ -3600,12 +3600,22 @@ with tab_recs:
     if filtered.empty:
         st.info("No recommendations match the current filters.")
     else:
-        # ── Load aftermath performance data (for P&L overlay on each card) ────
+        from recommendations_tracker import (
+            log_recommendations as _log_recs,
+            get_aftermath_table as _get_aftermath,
+            ensure_schema as _ensure_schema,
+        )
+
+        # ── Auto-log current recommendations (24h cooldown prevents double-logging)
         _recs_aftermath = pd.DataFrame()
+        _newly_logged = 0
         try:
-            _recs_aftermath = get_aftermath_table()
-        except Exception:
-            pass
+            _ensure_schema()
+            if not pulse_table.empty:
+                _newly_logged = _log_recs(pulse_table, source="weather")
+            _recs_aftermath = _get_aftermath()
+        except Exception as _e:
+            st.warning(f"Performance tracking unavailable: {_e}")
 
         # ── KPI bar ───────────────────────────────────────────────────────────
         _tb_total = filtered["anomaly_type"].nunique()
@@ -3617,6 +3627,13 @@ with tab_recs:
         rc2.metric("🟢 Long setups",  _tb_long)
         rc3.metric("🔴 Short setups", _tb_short)
         rc4.metric("📊 Positions tracked", _tb_tracked)
+
+        if _newly_logged > 0:
+            st.success(f"📌 Auto-logged {_newly_logged} new position{'s' if _newly_logged != 1 else ''} — P&L will update as prices move.")
+        elif _tb_tracked > 0:
+            st.caption("📊 Performance overlays below are live — entry prices were locked when each position was first logged.")
+        else:
+            st.info("📌 Entry prices are being fetched now. Refresh in a moment to see P&L badges appear on each card.")
         st.divider()
 
         # ── Build ranked group list (same groupby as Radar tab) ───────────────
